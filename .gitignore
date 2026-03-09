@@ -1,0 +1,14 @@
+enrichgo
+enrichgo.exe
+*.out
+*.test
+*.prof
+*.pyc
+
+artifacts/
+tmp/
+__pycache__/
+scripts/alignment/__pycache__/
+
+.claude/
+refer-fgsea/fgsea/

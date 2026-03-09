@@ -1,0 +1,62 @@
+Package: clusterProfiler
+Type: Package
+Title: A Universal Enrichment Tool for Interpreting Omics Data
+Version: 4.19.5.003
+Authors@R: c(
+    person(given = "Guangchuang", family = "Yu",        email = "guangchuangyu@gmail.com",   role  = c("aut", "cre", "cph"), comment = c(ORCID = "0000-0002-6485-8781")),
+    person(given = "Li-Gen",      family = "Wang",      email = "reeganwang020@gmail.com",   role  = "ctb"),
+    person(given = "Xiao",        family = "Luo",       email = "l77880853349@163.com",      role  = "ctb"),
+    person(given = "Meijun",      family = "Chen",      email = "mjchen1996@outlook.com",    role  = "ctb"),
+    person(given = "Giovanni",    family = "Dall'Olio", email = "giovanni.dallolio@upf.edu", role = "ctb"),
+    person(given = "Wanqian",     family = "Wei",       email = "altair_wei@outlook.com",    role = "ctb"),
+    person(given = "Chun-Hui",    family = "Gao",       email = "gaospecial@gmail.com",      role = "ctb", comment = c(ORCID = "0000-0002-1445-7939"))
+	)
+Maintainer: Guangchuang Yu <guangchuangyu@gmail.com>
+Description: A universal tool for interpreting functional characteristics of omics data.
+    It supports Over-Representation Analysis (ORA) and Gene Set Enrichment Analysis (GSEA) for both coding and non-coding genomics data of thousands of species.
+    It provides a unified and tidy interface to access, manipulate, and visualize enrichment results.
+    A key capability is the simultaneous analysis and comparison of datasets from multiple treatments or time points.
+    Furthermore, it integrates Large Language Model (LLM) capabilities to provide automated and insightful interpretation of enrichment results.
+Depends:
+    R (>= 4.2.0)
+Imports:
+    AnnotationDbi,
+    dplyr,
+    enrichit (>= 0.1.1),
+    enrichplot (>= 1.9.3),
+    GO.db,
+    GOSemSim (>= 2.27.2),
+    gson (>= 0.0.7),
+    httr,
+    igraph,
+    jsonlite,
+    magrittr,
+    methods,
+    plyr,
+    qvalue,
+    rlang,
+    stats,
+    tidyr,
+    utils,
+    yulab.utils (>= 0.2.3),
+    ggplot2
+Suggests:
+    AnnotationHub,
+    BiocManager,
+    DOSE,
+    fanyi (>= 0.1.0),
+    ggtangle,
+    readr,
+    org.Hs.eg.db,
+    quarto,
+    testthat
+VignetteBuilder: quarto
+ByteCompile: true
+License: Artistic-2.0
+URL: https://yulab-smu.top/contribution-knowledge-mining/
+BugReports: https://github.com/YuLab-SMU/clusterProfiler/issues
+Packaged: NA
+biocViews: Annotation, Clustering, GeneSetEnrichment, GO, KEGG,
+    MultipleComparison, Pathways, Reactome, Visualization
+Encoding: UTF-8
+RoxygenNote: 7.3.3

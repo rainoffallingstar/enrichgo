@@ -1,0 +1,443 @@
+#' GO Enrichment Analysis of a gene set.
+#' Given a vector of genes, this function will return the enrichment GO
+#' categories after FDR control.
+#'
+#'
+#' @param gene a vector of entrez gene id.
+#' @param OrgDb OrgDb
+#' @param keyType keytype of input gene
+#' @param ont One of "BP", "MF", and "CC" subontologies, or "ALL" for all three.
+#' @inheritParams enricher
+#' @param minGSSize minimal size of genes annotated by Ontology term for testing.
+#' @param maxGSSize maximal size of genes annotated for testing
+#' @param readable whether mapping gene ID to gene Name
+#' @param pool If ont='ALL', whether pool 3 GO sub-ontologies
+#' @return An \code{enrichResult} instance.
+#' @importClassesFrom enrichit enrichResult
+#' @importFrom enrichit setReadable
+#' @importFrom utils stack
+#' @seealso [enrichResult-class], [compareCluster]
+#' @keywords manip
+#' @export
+#' @author Guangchuang Yu \url{https://yulab-smu.top}
+#' @examples
+#' \dontrun{
+#'   data(geneList, package = "DOSE")
+#' 	de <- names(geneList)[1:100]
+#' 	yy <- enrichGO(de, 'org.Hs.eg.db', ont="BP", pvalueCutoff=0.01)
+#' 	head(yy)
+#' }
+enrichGO <- function(
+    gene,
+    OrgDb,
+    keyType = "ENTREZID",
+    ont = "MF",
+    pvalueCutoff = 0.05,
+    pAdjustMethod = "BH",
+    universe,
+    qvalueCutoff = 0.2,
+    minGSSize = 10,
+    maxGSSize = 500,
+    readable = FALSE,
+    pool = FALSE
+) {
+    if (keyType != "ENTREZID") {
+        # This is to avoid Memory Boom for non-ENTREZID keyType
+        # see https://github.com/YuLab-SMU/clusterProfiler/issues/805
+        #
+        # If we use `get_GO_data` to build the GSON object for non-ENTREZID keyType,
+        # it will trigger `AnnotationDbi::mapIds` to map all GO terms to the specific keyType.
+        # This will be extremely slow and memory consuming if the keyType is ACCNUM,
+        # because one gene can have multiple ACCNUMs.
+        #
+        # So we first map the input gene to ENTREZID, and then use ENTREZID to do the enrichment analysis.
+        # After that, we map the result back to the original keyType.
+        
+        gene <- clusterProfiler::bitr(gene, fromType = keyType, toType = "ENTREZID", OrgDb = OrgDb)
+        if (is.null(gene)) {
+            message("--> No gene can be mapped....")
+            return(NULL)
+        }
+        
+        res <- enrichGO(
+            gene = gene$ENTREZID,
+            OrgDb = OrgDb,
+            keyType = "ENTREZID",
+            ont = ont,
+            pvalueCutoff = pvalueCutoff,
+            pAdjustMethod = pAdjustMethod,
+            universe = universe,
+            qvalueCutoff = qvalueCutoff,
+            minGSSize = minGSSize,
+            maxGSSize = maxGSSize,
+            readable = readable,
+            pool = pool
+        )
+        
+        if (is.null(res)) {
+            return(NULL)
+        }
+        
+        res@keytype <- keyType
+        
+        # map geneID back to original keyType
+        if (readable) {
+            res <- setReadable(res, OrgDb, keyType = "ENTREZID")
+        } else {
+            res <- setReadable(res, OrgDb, keyType = "ENTREZID", toType = keyType)
+            res@readable <- FALSE
+        }
+        
+        return(res)
+    }
+
+    ont %<>% toupper
+    ont <- match.arg(ont, c("BP", "MF", "CC", "ALL"))
+    GO_DATA <- get_GO_data(OrgDb, ont, keyType)
+
+    if (missing(universe)) {
+        universe <- NULL
+    }
+
+    if (ont == "ALL" && !pool) {
+        lres <- lapply(c("BP", "CC", "MF"), function(ont) {
+            suppressMessages(enrichGO(
+                gene,
+                OrgDb,
+                keyType,
+                ont,
+                pvalueCutoff,
+                pAdjustMethod,
+                universe,
+                qvalueCutoff,
+                minGSSize,
+                maxGSSize
+            ))
+        })
+
+        lres <- lres[!vapply(lres, is.null, logical(1))]
+        if (length(lres) == 0) {
+            return(NULL)
+        }
+
+        df <- do.call('rbind', lapply(lres, as.data.frame))
+        geneSets <- lres[[1]]@geneSets
+        if (length(lres) > 1) {
+            for (i in 2:length(lres)) {
+                geneSets <- append(geneSets, lres[[i]]@geneSets)
+            }
+        }
+        res <- lres[[1]]
+        res@result <- df
+        res@geneSets <- geneSets
+    } else {
+        res <- enrichit::ora_gson(
+            gene,
+            pvalueCutoff = pvalueCutoff,
+            pAdjustMethod = pAdjustMethod,
+            universe = universe,
+            qvalueCutoff = qvalueCutoff,
+            minGSSize = minGSSize,
+            maxGSSize = maxGSSize,
+            gson = GO_DATA
+        )
+
+        if (is.null(res)) {
+            return(res)
+        }
+    }
+    if (keyType == 'SYMBOL') {
+        res@readable <- TRUE
+    }
+    res@keytype <- keyType
+    res@organism <- get_organism(OrgDb)
+    if (readable) {
+        res <- setReadable(res, OrgDb)
+    }
+    res@ontology <- ont
+
+    if (ont == "ALL") {
+        res <- add_GO_Ontology(res, GO_DATA)
+    }
+    return(res)
+}
+
+#' @importFrom AnnotationDbi keys
+#' @importFrom AnnotationDbi keytypes
+#' @importFrom AnnotationDbi toTable
+#' @importFrom GO.db GOTERM
+get_GO_data <- function(OrgDb, ont, keytype) {
+    GO_Env <- get_GO_Env()
+    use_cached <- FALSE
+
+    ont2 <- NULL
+    if (exists("ont", envir = GO_Env, inherits = FALSE)) {
+        ont2 <- get("ont", envir = GO_Env)
+    }
+
+    if (exists("organism", envir = GO_Env, inherits = FALSE) &&
+        exists("keytype", envir = GO_Env, inherits = FALSE) &&
+        !is.null(ont2)) {
+        
+        org <- get("organism", envir = GO_Env)
+        kt <- get("keytype", envir = GO_Env)
+
+        if (org == get_organism(OrgDb) &&
+            keytype == kt &&
+            (ont == ont2 || ont2 == "ALL") &&
+            exists("goAnno", envir = GO_Env, inherits = FALSE)) {
+            use_cached <- TRUE
+        }
+    }
+
+    if (use_cached) {
+        goAnno <- get("goAnno", envir = GO_Env)
+    } else {
+        OrgDb <- load_OrgDb(OrgDb)
+        kt <- keytypes(OrgDb)
+        if (!keytype %in% kt) {
+            stop("keytype is not supported...")
+        }
+
+        goterms <- AnnotationDbi::Ontology(GO.db::GOTERM)
+        if (ont != "ALL") {
+            goterms <- goterms[goterms == ont]
+        }
+        go2gene <- suppressMessages(
+            AnnotationDbi::mapIds(
+                OrgDb,
+                keys = names(goterms),
+                column = keytype,
+                keytype = "GOALL",
+                multiVals = 'list'
+            )
+        )
+        goAnno <- stack(go2gene)
+        colnames(goAnno) <- c(keytype, "GOALL")
+        goAnno <- unique(goAnno[!is.na(goAnno[, 1]), ])
+        goAnno$ONTOLOGYALL <- goterms[goAnno$GOALL]
+
+        assign("goAnno", goAnno, envir = GO_Env)
+        assign("keytype", keytype, envir = GO_Env)
+        assign("ont", ont, envir = GO_Env)
+        assign("organism", get_organism(OrgDb), envir = GO_Env)
+    }
+
+    # Filter if needed (if cached was ALL but we want specific)
+    if (ont != "ALL") {
+        goAnno <- goAnno[goAnno$ONTOLOGYALL == ont, ]
+    }
+
+    # Build GSON
+    GO2GENE <- unique(goAnno[, c(2, 1)])
+    gsid2gene <- GO2GENE
+    colnames(gsid2gene) <- c("gsid", "gene")
+    
+    termmap <- get_GO2TERM_table()
+    gsid2name <- termmap[termmap$go_id %in% gsid2gene$gsid, ]
+    colnames(gsid2name) <- c("gsid", "name")
+    
+    gson_obj <- gson::gson(gsid2gene = gsid2gene,
+                           gsid2name = gsid2name,
+                           species = get_organism(OrgDb),
+                           gsname = paste0("GO_", ont),
+                           keytype = keytype,
+                           version = "unknown",
+                           accessed_date = as.character(Sys.Date()))
+    
+    return(gson_obj)
+}
+
+get_GO_Env <- function() {
+    if (!exists(".GO_clusterProfiler_Env", envir = .GlobalEnv)) {
+        pos <- 1
+        envir <- as.environment(pos)
+        assign(".GO_clusterProfiler_Env", new.env(), envir = envir)
+    }
+    get(".GO_clusterProfiler_Env", envir = .GlobalEnv)
+}
+
+
+## #' @importMethodsFrom AnnotationDbi Ontology
+## #' @importFrom GO.db GOTERM
+## #' @importMethodsFrom AnnotationDbi mappedkeys
+## #' @importFrom plyr dlply
+## #' @importFrom plyr .
+## #' @importClassesFrom methods data.frame
+## EXTID2TERMID.GO <- function(gene, ont, organism) {
+
+##     gene <- as.character(gene)
+
+##     ## get all goterms within the specific ontology
+##     goterms <- Ontology(GOTERM)
+##     goterms <- names(goterms[goterms == ont])
+
+##     supported_Org <- getSupported_Org()
+##     if (organism %in% supported_Org) {
+##         mappedDb <- getGO2ALLEG_MappedDb(organism)
+
+##         orgTerm <- mappedkeys(mappedDb)
+
+##         ## narrow down goterms to specific organism
+##         Terms <- goterms[goterms %in% orgTerm]
+
+##         ## mapping GO to External gene ID
+##         class(Terms) <- ont
+##         GO2ExtID <- TERMID2EXTID(Terms, organism)
+
+##         qGO2ExtID = lapply(GO2ExtID, function(i) gene[gene %in% i])
+##         len <- sapply(qGO2ExtID, length)
+##         notZero.idx <- len != 0
+##         qGO2ExtID <- qGO2ExtID[notZero.idx]
+
+##         len <- sapply(qGO2ExtID, length)
+##         qGO2ExtID.df <- data.frame(GO=rep(names(qGO2ExtID), times=len),
+##                                    ExtID=unlist(qGO2ExtID))
+
+##         ExtID <- NULL ## to satisfy codetools
+##         qExtID2GO <- dlply(qGO2ExtID.df, .(ExtID), function(i) as.character(i$GO))
+##     } else {
+##         oldwd <- getwd()
+
+##         if (file.exists("EG2ALLGO.rda")) {
+##             EG2ALLGO <- NULL # to satisfy codetools
+##             load("EG2ALLGO.rda")
+##             qExtID2GO <- EG2ALLGO[gene]
+##             qExtID2GO <- lapply(qExtID2GO, function(i) i[i %in% goterms])
+##         } else if (organism == "D39") {
+##             dir <- system.file("extdata/D39/", package="clusterProfiler")
+##             setwd(dir)
+##         } else if (organism == "M5005") {
+##             dir <- system.file("extdata/M5005/", package="clusterProfiler")
+##             setwd(dir)
+##         } else {
+##             setwd(oldwd)
+##             stop("GO mapping files not found in the working directory")
+##         }
+
+##         setwd(oldwd)
+##     }
+##     return(qExtID2GO)
+## }
+
+## #' @importMethodsFrom AnnotationDbi mget
+## #' @importFrom GOSemSim getSupported_Org
+## TERMID2EXTID.GO <- function(term, organism, ...) {
+##     term <- as.character(term)
+
+##     GO2ALLEG <- GO2EXTID(organism)
+##     if (is(GO2ALLEG, "Go3AnnDbBimap")) {
+##         GO2ExtID <- mget(term, GO2ALLEG, ifnotfound=NA)
+##         GO2ExtID <- lapply(GO2ExtID, function(i) unique(i))
+##     } else {
+##         GO2ExtID <- GO2ALLEG[term]
+##     }
+##     return(GO2ExtID)
+## }
+
+## GO2EXTID <- function(organism) {
+##     supported_Org <- getSupported_Org()
+##     if (organism %in% supported_Org) {
+##         GO2ALLEG <- getGO2ALLEG_MappedDb(organism)
+##     } else {
+##         oldwd <- getwd()
+##         if(organism == "D39") {
+##             dir <- system.file("extdata/D39/", package="clusterProfiler")
+##             setwd(dir)
+##         }
+##         if(organism == "M5005") {
+##             dir <- system.file("extdata/M5005/", package="clusterProfiler")
+##             setwd(dir)
+##         }
+##         if (file.exists("GO2ALLEG.rda")) {
+##             GO2ALLEG <- NULL # to satisfy codetools
+##             load("GO2ALLEG.rda")
+##         } else {
+##             setwd(oldwd)
+##             stop("GO Mapping file not found in the working directory")
+##         }
+##         setwd(oldwd)
+##     }
+##     return(GO2ALLEG)
+## }
+
+## #' @importMethodsFrom AnnotationDbi mappedkeys
+## #' @importFrom GOSemSim getSupported_Org
+## ALLEXTID.GO <- function(organism) {
+##     supported_Org <- getSupported_Org()
+##     if (organism %in% supported_Org) {
+##         mappedDb <- getEG2GO_MappedDb(organism)
+##         extID <- mappedkeys(mappedDb)
+##     } else {
+##         oldwd <- getwd()
+##         if(organism == "D39") {
+##             dir <- system.file("extdata/D39/", package="clusterProfiler")
+##             setwd(dir)
+##         }
+##         if(organism == "M5005") {
+##             dir <- system.file("extdata/M5005/", package="clusterProfiler")
+##             setwd(dir)
+##         }
+##         if (file.exists("EG2ALLGO.rda")) {
+##             EG2ALLGO <- NULL ## to satisfy codetools
+##             load("EG2ALLGO.rda")
+##             extID <- names(EG2ALLGO)
+##         } else {
+##             setwd(oldwd)
+##             stop("GO mapping file not found in the working directory")
+##         }
+##         setwd(oldwd)
+##     }
+##     return(extID)
+## }
+
+#' drop GO term of specific level or specific terms (mostly too general).
+#'
+#'
+#' @title dropGO
+#' @param x an instance of 'enrichResult' or 'compareClusterResult'
+#' @param level GO level
+#' @param term GO term
+#' @return modified version of x
+#' @importFrom GO.db GOTERM
+#' @importFrom AnnotationDbi Ontology
+#' @export
+#' @author Guangchuang Yu
+dropGO <- function(x, level = NULL, term = NULL) {
+    if (!(is(x, "enrichResult") || is(x, "compareClusterResult"))) {
+        stop(
+            "x should be an instance of 'enrichResult' or 'compareClusterResult' ..."
+        )
+    }
+
+    res <- as.data.frame(x)
+
+    if (!is.null(level)) {
+        if (is(x, "enrichResult")) {
+            ont <- x@ontology
+        } else {
+            ont <- x@.call$ont
+            if (is.null(ont)) {
+                ## should be "MF", default value of enrichGO
+                ## it's safe to determine from the output
+                ont <- res$ID[1] %>% GOTERM[[.]] %>% Ontology
+            }
+        }
+
+        tt <- getGOLevel(ont, level)
+        term <- c(term, tt) %>% unique
+    }
+    if (is.null(term)) {
+        return(x)
+    }
+
+    if (is(x, "enrichResult")) {
+        res <- res[!res$ID %in% term, ]
+        x@result <- res
+    } else {
+        res <- res[!res$ID %in% term, ]
+        x@compareClusterResult <- res
+    }
+
+    return(x)
+}

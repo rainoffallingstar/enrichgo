@@ -1,0 +1,83 @@
+name: performance
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '*.go'
+      - 'cmd_*.go'
+      - 'pkg/**'
+      - 'scripts/alignment/**'
+      - 'test-data/**'
+      - 'data/**'
+      - '.github/workflows/performance.yml'
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Setup R
+        uses: r-lib/actions/setup-r@v2
+
+      - name: Install R deps
+        shell: bash
+        run: |
+          Rscript -e 'if (!requireNamespace("BiocManager", quietly=TRUE)) install.packages("BiocManager", repos="https://cloud.r-project.org")'
+          Rscript -e 'BiocManager::install(c("clusterProfiler","org.Hs.eg.db","BiocParallel"), ask=FALSE, update=FALSE)'
+          Rscript -e 'install.packages("jsonlite", repos="https://cloud.r-project.org")'
+
+      - name: Build
+        run: go build -o enrichgo .
+
+      - name: Prepare KEGG-mappable input
+        shell: bash
+        run: |
+          python3 scripts/alignment/filter_input_by_idmap.py \
+            test-data/DE_results.csv \
+            data/kegg_hsa_idmap.tsv \
+            /tmp/benchmark_input_kegg.csv
+
+      - name: ORA benchmark (Go vs R)
+        shell: bash
+        run: |
+          ./enrichgo enrich \
+            -i /tmp/benchmark_input_kegg.csv \
+            -d kegg -s hsa \
+            --fdr-col FDR --fdr-threshold 0.05 --split-by-direction=false \
+            -o /tmp/benchmark_ora_kegg_go.tsv \
+            --benchmark \
+            --benchmark-out /tmp/benchmark_ora_report.tsv
+
+      - name: GSEA benchmark (Go vs R)
+        shell: bash
+        run: |
+          ./enrichgo gsea \
+            -i /tmp/benchmark_input_kegg.csv \
+            -d kegg -s hsa \
+            -rank-col logFC -nPerm 50 \
+            -o /tmp/benchmark_gsea_kegg_go.tsv \
+            --benchmark \
+            --benchmark-out /tmp/benchmark_gsea_report.tsv
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-reports
+          path: |
+            /tmp/benchmark_ora_report.tsv
+            /tmp/benchmark_gsea_report.tsv
+            /tmp/benchmark_ora_kegg_go.tsv
+            /tmp/benchmark_ora_kegg_go.r.tsv
+            /tmp/benchmark_gsea_kegg_go.tsv
+            /tmp/benchmark_gsea_kegg_go.r.tsv

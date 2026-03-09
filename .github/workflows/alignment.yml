@@ -1,0 +1,57 @@
+name: alignment
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '*.go'
+      - 'cmd_*.go'
+      - 'pkg/**'
+      - 'scripts/alignment/**'
+      - 'docs/alignment.md'
+      - 'test-data/**'
+      - 'data/**'
+      - '.github/workflows/alignment.yml'
+
+jobs:
+  alignment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Setup R
+        uses: r-lib/actions/setup-r@v2
+
+      - name: Install R deps
+        shell: bash
+        run: |
+          Rscript -e 'if (!requireNamespace("BiocManager", quietly=TRUE)) install.packages("BiocManager", repos="https://cloud.r-project.org")'
+          Rscript -e 'BiocManager::install(c("clusterProfiler","org.Hs.eg.db","BiocParallel"), ask=FALSE, update=FALSE)'
+          Rscript -e 'install.packages("jsonlite", repos="https://cloud.r-project.org")'
+
+      - name: Unit tests
+        run: go test ./...
+
+      - name: Alignment smoke+formal gates
+        shell: bash
+        env:
+          ALIGN_SKIP_DOWNLOAD: "1"
+          SMOKE_NPERM: "100"
+          FORMAL_NPERM: "5000"
+        run: |
+          ./scripts/alignment/run_alignment_ci.sh /tmp/alignment_ci data test-data/DE_results.csv
+
+      - name: Upload alignment artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alignment-ci
+          path: /tmp/alignment_ci

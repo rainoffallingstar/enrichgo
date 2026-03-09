@@ -1,0 +1,70 @@
+name: Update KEGG Data
+
+on:
+  schedule:
+    # Run at 00:00 on Sunday (UTC)
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: devel
+
+      - name: Setup R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+
+      - name: Setup R dependencies
+        uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          extra-packages: |
+            any::rvest
+            any::tibble
+            any::tidyr
+            any::devtools
+            YuLab-SMU/yulab.utils
+            YuLab-SMU/enrichit
+            YuLab-SMU/enrichplot
+            YuLab-SMU/GOSemSim
+            YuLab-SMU/DOSE
+            local::.
+          needs: check
+
+      - name: Install package
+        run: |
+          Rscript -e 'devtools::install()'
+
+      - name: Update KEGG Data
+        run: |
+          Rscript -e 'source(system.file("extdata/kegg_pathway_category.r", package="clusterProfiler"))'
+          Rscript -e 'clusterProfiler:::get_kegg_species(save=TRUE)'
+          
+          # Prepare staging directory
+          mkdir -p staging
+          cp data/kegg_category.rda staging/
+          cp data/kegg_species.rda staging/
+          
+          # Generate md5.txt (Filename MD5)
+          cd staging
+          md5sum *.rda | awk '{print $2, $1}' > md5.txt
+          cd ..
+        shell: bash
+
+      - name: Deploy to gh-pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./staging
+          keep_files: true
+          commit_message: "Deploy KEGG data"
