@@ -9,6 +9,7 @@ ALIGN_NPERM="${ALIGN_NPERM:-1000}"
 ALIGN_GSEA_PVALUE_METHOD="${ALIGN_GSEA_PVALUE_METHOD:-simple}"
 ALIGN_GSEA_PVALUE_METHOD_MSIGDB="${ALIGN_GSEA_PVALUE_METHOD_MSIGDB:-$ALIGN_GSEA_PVALUE_METHOD}"
 ALIGN_GSEA_MAX_PERM="${ALIGN_GSEA_MAX_PERM:-20000}"
+ALIGN_GSEA_PADJ_CUTOFF="${ALIGN_GSEA_PADJ_CUTOFF:-0.05}"
 ALIGN_SKIP_DOWNLOAD="${ALIGN_SKIP_DOWNLOAD:-0}"
 ALIGN_MIN_CONV_RATE="${ALIGN_MIN_CONV_RATE:-0.90}"
 ALIGN_ONLY_ORA="${ALIGN_ONLY_ORA:-0}"
@@ -28,7 +29,7 @@ if [[ ! -f "$INPUT_CSV" ]]; then
 fi
 
 echo "[ALIGN] input=$INPUT_CSV out=$OUT_DIR data=$DATA_DIR"
-echo "[ALIGN] nperm=$ALIGN_NPERM gsea_pvalue_method=$ALIGN_GSEA_PVALUE_METHOD gsea_pvalue_method_msigdb=$ALIGN_GSEA_PVALUE_METHOD_MSIGDB gsea_max_perm=$ALIGN_GSEA_MAX_PERM skip_download=$ALIGN_SKIP_DOWNLOAD skip_kegg=$ALIGN_SKIP_KEGG include_reactome=$ALIGN_INCLUDE_REACTOME include_msigdb=$ALIGN_INCLUDE_MSIGDB msigdb_collections=$ALIGN_MSIGDB_COLLECTIONS only_ora=$ALIGN_ONLY_ORA debug_go_gsea=$ALIGN_DEBUG_GO_GSEA"
+echo "[ALIGN] nperm=$ALIGN_NPERM gsea_pvalue_method=$ALIGN_GSEA_PVALUE_METHOD gsea_pvalue_method_msigdb=$ALIGN_GSEA_PVALUE_METHOD_MSIGDB gsea_max_perm=$ALIGN_GSEA_MAX_PERM gsea_padj_cutoff=$ALIGN_GSEA_PADJ_CUTOFF skip_download=$ALIGN_SKIP_DOWNLOAD skip_kegg=$ALIGN_SKIP_KEGG include_reactome=$ALIGN_INCLUDE_REACTOME include_msigdb=$ALIGN_INCLUDE_MSIGDB msigdb_collections=$ALIGN_MSIGDB_COLLECTIONS only_ora=$ALIGN_ONLY_ORA debug_go_gsea=$ALIGN_DEBUG_GO_GSEA"
 
 pushd "$ROOT_DIR" >/dev/null
 
@@ -203,6 +204,7 @@ if [[ "$ALIGN_ONLY_ORA" != "1" ]]; then
     ./enrichgo gsea \
       -i "$KEGG_INPUT_CSV" -d kegg -s hsa --data-dir "$DATA_DIR" \
       -rank-col logFC -seed 42 -nPerm "$ALIGN_NPERM" -ont BP \
+      -padj-cutoff "$ALIGN_GSEA_PADJ_CUTOFF" \
       -pvalue-method "$ALIGN_GSEA_PVALUE_METHOD" -max-perm "$ALIGN_GSEA_MAX_PERM" \
       -o "$OUT_DIR/go_gsea_kegg.tsv"
 
@@ -210,6 +212,7 @@ if [[ "$ALIGN_ONLY_ORA" != "1" ]]; then
     ./enrichgo gsea \
       -i "$INPUT_CSV" -d custom -gmt "$GO_GMT_FILE" -s hsa --data-dir "$DATA_DIR" \
       -rank-col logFC -seed 42 -nPerm "$ALIGN_NPERM" \
+      -padj-cutoff "$ALIGN_GSEA_PADJ_CUTOFF" \
       -pvalue-method "$ALIGN_GSEA_PVALUE_METHOD" -max-perm "$ALIGN_GSEA_MAX_PERM" \
       -o "$OUT_DIR/go_gsea_go.tsv"
     if [[ "$ALIGN_DEBUG_GO_GSEA" == "1" ]]; then
@@ -224,6 +227,7 @@ if [[ "$ALIGN_ONLY_ORA" != "1" ]]; then
     ./enrichgo gsea \
       -i "$INPUT_CSV" -d go -s hsa --data-dir "$DATA_DIR" \
       -rank-col logFC -seed 42 -nPerm "$ALIGN_NPERM" -ont BP \
+      -padj-cutoff "$ALIGN_GSEA_PADJ_CUTOFF" \
       -pvalue-method "$ALIGN_GSEA_PVALUE_METHOD" -max-perm "$ALIGN_GSEA_MAX_PERM" \
       -o "$OUT_DIR/go_gsea_go.tsv"
     if [[ "$ALIGN_DEBUG_GO_GSEA" == "1" ]]; then
@@ -259,6 +263,7 @@ if [[ "$ALIGN_ONLY_ORA" != "1" ]]; then
     ./enrichgo gsea \
       -i "$INPUT_CSV" -d custom -gmt "$REACTOME_GMT_FILE" -s hsa --data-dir "$DATA_DIR" \
       -rank-col logFC -seed 42 -nPerm "$ALIGN_NPERM" \
+      -padj-cutoff "$ALIGN_GSEA_PADJ_CUTOFF" \
       -pvalue-method "$ALIGN_GSEA_PVALUE_METHOD" -max-perm "$ALIGN_GSEA_MAX_PERM" \
       -o "$OUT_DIR/go_gsea_reactome.tsv"
   fi
@@ -266,6 +271,7 @@ if [[ "$ALIGN_ONLY_ORA" != "1" ]]; then
     ./enrichgo gsea \
       -i "$INPUT_CSV" -d custom -gmt "$MSIGDB_GMT_FILE" -s hsa --data-dir "$DATA_DIR" \
       -rank-col logFC -seed 42 -nPerm "$ALIGN_NPERM" \
+      -padj-cutoff "$ALIGN_GSEA_PADJ_CUTOFF" \
       -pvalue-method "$ALIGN_GSEA_PVALUE_METHOD_MSIGDB" -max-perm "$ALIGN_GSEA_MAX_PERM" \
       -o "$OUT_DIR/go_gsea_msigdb.tsv"
   fi
