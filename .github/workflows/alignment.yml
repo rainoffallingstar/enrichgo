@@ -30,15 +30,13 @@ jobs:
       - name: Setup R
         uses: r-lib/actions/setup-r@v2
 
-      - name: Install R deps
-        uses: r-lib/actions/setup-r-dependencies@v2
-        with:
-          extra-packages: |
-            any::BiocManager
-            bioc::BiocParallel
-            bioc::org.Hs.eg.db
-            bioc::clusterProfiler
-            any::jsonlite
+      - name: Install R deps (pak + GitHub)
+        shell: bash
+        env:
+          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          Rscript -e 'if (!requireNamespace("pak", quietly=TRUE)) install.packages("pak", repos="https://r-lib.github.io/p/pak/stable/")'
+          Rscript -e 'pak::pak(c("BiocParallel","org.Hs.eg.db","jsonlite","YuLab-SMU/clusterProfiler"))'
 
       - name: Verify R deps
         shell: bash
