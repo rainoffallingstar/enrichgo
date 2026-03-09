@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"enrichgo/pkg/annotation"
@@ -58,5 +60,43 @@ func TestTargetIDTypeForDatabase(t *testing.T) {
 				t.Fatalf("targetIDTypeForDatabase(%q)=%v, want %v", tc.db, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestMapIDsForDisplay(t *testing.T) {
+	ids := []string{"1", "2", "X"}
+	display := map[string]string{
+		"1": "TP53",
+		"2": "EGFR",
+	}
+	got := mapIDsForDisplay(ids, display)
+	want := []string{"TP53", "EGFR", "X"}
+	if len(got) != len(want) {
+		t.Fatalf("len(got)=%d, want=%d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got[%d]=%q, want=%q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestLoadEntrezSymbolMapFromIDMap(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "kegg_hsa_idmap.tsv")
+	content := "1\tTP53\n2\tEGFR\n2\tEGFR_DUP\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write temp idmap: %v", err)
+	}
+	got, err := loadEntrezSymbolMapFromIDMap(path)
+	if err != nil {
+		t.Fatalf("loadEntrezSymbolMapFromIDMap error: %v", err)
+	}
+	if got["1"] != "TP53" {
+		t.Fatalf("got[1]=%q, want TP53", got["1"])
+	}
+	// duplicate ENTREZ keeps first symbol
+	if got["2"] != "EGFR" {
+		t.Fatalf("got[2]=%q, want EGFR", got["2"])
 	}
 }

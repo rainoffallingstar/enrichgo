@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -47,6 +48,7 @@ type gseaCmd struct {
 
 func runGSEA(cmd *flag.FlagSet) {
 	c := &gseaCmd{}
+	displayGeneMap := make(map[string]string) // result gene ID -> SYMBOL
 
 	cmd.StringVar(&c.inputFile, "i", "", "Input ranked gene file (required)")
 	cmd.StringVar(&c.outputFile, "o", "gsea_result.tsv", "Output file")
@@ -174,6 +176,7 @@ func runGSEA(cmd *flag.FlagSet) {
 				}
 				fmt.Fprintf(os.Stderr, "Warning: ID conversion failed: %v, using original IDs\n", err)
 			} else {
+				mergeDisplayMapFromConversion(displayGeneMap, mapping)
 				input.Genes = converted
 				fmt.Printf("Converted %d genes\n", len(converted))
 				// 更新 GeneValues
@@ -186,6 +189,14 @@ func runGSEA(cmd *flag.FlagSet) {
 					}
 				}
 				input.GeneValues = newValues
+			}
+		}
+	}
+	if len(displayGeneMap) == 0 && strings.EqualFold(c.database, "kegg") {
+		idmapPath := filepath.Join(c.dataDir, fmt.Sprintf("kegg_%s_idmap.tsv", c.species))
+		if m, err := loadEntrezSymbolMapFromIDMap(idmapPath); err == nil {
+			for k, v := range m {
+				displayGeneMap[k] = v
 			}
 		}
 	}
@@ -341,7 +352,7 @@ func runGSEA(cmd *flag.FlagSet) {
 
 	// 4. 写入结果
 	fmt.Printf("Writing results to %s...\n", c.outputFile)
-	if err := io.WriteGSEAResults(convertGSEAResults(results), c.outputFile, io.OutputFormat(c.format)); err != nil {
+	if err := io.WriteGSEAResults(convertGSEAResults(results, displayGeneMap), c.outputFile, io.OutputFormat(c.format)); err != nil {
 		fmt.Fprintf(os.Stderr, "Error writing output: %v\n", err)
 		os.Exit(1)
 	}
@@ -349,7 +360,7 @@ func runGSEA(cmd *flag.FlagSet) {
 	fmt.Println("Done!")
 }
 
-func convertGSEAResults(results []*analysis.GSEAResult) []*io.GSEAResult {
+func convertGSEAResults(results []*analysis.GSEAResult, displayGeneMap map[string]string) []*io.GSEAResult {
 	var converted []*io.GSEAResult
 	for _, r := range results {
 		converted = append(converted, &io.GSEAResult{
@@ -360,7 +371,7 @@ func convertGSEAResults(results []*analysis.GSEAResult) []*io.GSEAResult {
 			PAdjust:         r.PAdjust,
 			QValue:          r.QValue,
 			EnrichmentScore: r.EnrichmentScore,
-			LeadGenes:       r.LeadGenes,
+			LeadGenes:       mapIDsForDisplay(r.LeadGenes, displayGeneMap),
 			Description:     r.Description,
 		})
 	}

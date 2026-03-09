@@ -4,6 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"enrichgo/pkg/analysis"
 	"enrichgo/pkg/annotation"
@@ -50,6 +52,7 @@ type enrichCmd struct {
 
 func runEnrich(cmd *flag.FlagSet) {
 	c := &enrichCmd{}
+	displayGeneMap := make(map[string]string) // result gene ID -> SYMBOL
 
 	cmd.StringVar(&c.inputFile, "i", "", "Input gene list file (required)")
 	cmd.StringVar(&c.outputFile, "o", "enrichment_result.tsv", "Output file")
@@ -196,6 +199,7 @@ func runEnrich(cmd *flag.FlagSet) {
 			}
 			fmt.Fprintf(os.Stderr, "Warning: ID conversion failed: %v, using original IDs\n", err)
 		} else {
+			mergeDisplayMapFromConversion(displayGeneMap, allMapping)
 			// 从映射中提取显著基因的转换 ID
 			sigSet := make(map[string]bool, len(input.Genes))
 			for _, g := range input.Genes {
@@ -232,6 +236,14 @@ func runEnrich(cmd *flag.FlagSet) {
 				}
 			}
 			input.GeneDirections = newDirs
+		}
+	}
+	if len(displayGeneMap) == 0 && strings.EqualFold(c.database, "kegg") {
+		idmapPath := filepath.Join(c.dataDir, fmt.Sprintf("kegg_%s_idmap.tsv", c.species))
+		if m, err := loadEntrezSymbolMapFromIDMap(idmapPath); err == nil {
+			for k, v := range m {
+				displayGeneMap[k] = v
+			}
 		}
 	}
 
@@ -487,7 +499,7 @@ func runEnrich(cmd *flag.FlagSet) {
 			}
 			upResults := analysis.RunORA(upParams)
 			fmt.Printf("Found %d enriched terms (Up)\n", len(upResults))
-			allConverted = append(allConverted, convertResults(upResults, "Up")...)
+			allConverted = append(allConverted, convertResults(upResults, "Up", displayGeneMap)...)
 		}
 
 		if len(downGenes) > 0 {
@@ -503,7 +515,7 @@ func runEnrich(cmd *flag.FlagSet) {
 			}
 			downResults := analysis.RunORA(downParams)
 			fmt.Printf("Found %d enriched terms (Down)\n", len(downResults))
-			allConverted = append(allConverted, convertResults(downResults, "Down")...)
+			allConverted = append(allConverted, convertResults(downResults, "Down", displayGeneMap)...)
 		}
 	} else {
 		// 原有逻辑：全部显著基因一起做 ORA
@@ -518,7 +530,7 @@ func runEnrich(cmd *flag.FlagSet) {
 		}
 		results := analysis.RunORA(params)
 		fmt.Printf("Found %d enriched terms\n", len(results))
-		allConverted = convertResults(results, "")
+		allConverted = convertResults(results, "", displayGeneMap)
 	}
 
 	// 4. 写入结果
@@ -532,7 +544,7 @@ func runEnrich(cmd *flag.FlagSet) {
 }
 
 // 转换结果格式
-func convertResults(results []*analysis.EnrichmentResult, direction string) []*io.EnrichmentResult {
+func convertResults(results []*analysis.EnrichmentResult, direction string, displayGeneMap map[string]string) []*io.EnrichmentResult {
 	var converted []*io.EnrichmentResult
 	for _, r := range results {
 		converted = append(converted, &io.EnrichmentResult{
@@ -544,7 +556,7 @@ func convertResults(results []*analysis.EnrichmentResult, direction string) []*i
 			PValue:      r.PValue,
 			PAdjust:     r.PAdjust,
 			QValue:      r.QValue,
-			Genes:       r.Genes,
+			Genes:       mapIDsForDisplay(r.Genes, displayGeneMap),
 			Count:       r.Count,
 			Description: r.Description,
 		})
