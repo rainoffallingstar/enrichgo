@@ -35,7 +35,7 @@ jobs:
           GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
         run: |
           Rscript -e 'if (!requireNamespace("pak", quietly=TRUE)) install.packages("pak", repos="https://r-lib.github.io/p/pak/stable/")'
-          Rscript -e 'pak::pak(c("BiocParallel","org.Hs.eg.db","jsonlite","YuLab-SMU/clusterProfiler"))'
+          Rscript -e 'pak::pak(c("BiocParallel","org.Hs.eg.db","jsonlite","YuLab-SMU/yulab.utils","YuLab-SMU/DOSE","YuLab-SMU/GOSemSim","YuLab-SMU/enrichplot","YuLab-SMU/clusterProfiler"))'
 
       - name: Verify R deps
         shell: bash
