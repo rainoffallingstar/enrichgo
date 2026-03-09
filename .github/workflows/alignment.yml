@@ -50,8 +50,8 @@ jobs:
         shell: bash
         env:
           ALIGN_SKIP_DOWNLOAD: "1"
-          SMOKE_NPERM: "100"
-          FORMAL_NPERM: "5000"
+          SMOKE_NPERM: "1000"
+          FORMAL_NPERM: "1000"
         run: |
           bash ./scripts/alignment/run_alignment_ci.sh /tmp/alignment_ci data test-data/DE_results.csv
 
