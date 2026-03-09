@@ -11,4 +11,5 @@ __pycache__/
 scripts/alignment/__pycache__/
 
 .claude/
+refer-code/
 refer-fgsea/fgsea/

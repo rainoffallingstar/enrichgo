@@ -4,6 +4,15 @@
 
 详细对齐说明见：[docs/alignment.md](/home/fallingstar10/clusterProfiler/enrichgo/docs/alignment.md)
 
+## 目录规范
+
+- Go 源码：仓库根目录（`main.go`、`cmd_*.go`）与 `pkg/`
+- 对齐与诊断脚本：`scripts/alignment/`
+- 文档：`docs/`
+- 测试数据与离线缓存：`test-data/`、`data/`
+- 示例输入/输出：`examples/input/`、`examples/output/`
+- 参考实现：`refer-code/`（本地保留，已加入 `.gitignore`）
+
 ## 默认参数
 
 - GSEA 默认置换次数：`nPerm=1000`
