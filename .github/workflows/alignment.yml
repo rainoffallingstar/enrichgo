@@ -47,7 +47,7 @@ jobs:
           SMOKE_NPERM: "100"
           FORMAL_NPERM: "5000"
         run: |
-          ./scripts/alignment/run_alignment_ci.sh /tmp/alignment_ci data test-data/DE_results.csv
+          bash ./scripts/alignment/run_alignment_ci.sh /tmp/alignment_ci data test-data/DE_results.csv
 
       - name: Upload alignment artifacts
         if: always()

@@ -32,7 +32,7 @@ run_one() {
   ALIGN_GSEA_PVALUE_METHOD="$pvalue_method" \
   ALIGN_GSEA_PVALUE_METHOD_MSIGDB="$FORMAL_GSEA_PVALUE_METHOD_MSIGDB" \
   ALIGN_GSEA_MAX_PERM="$FORMAL_GSEA_MAX_PERM" \
-  "$ROOT_DIR/scripts/alignment/run_alignment.sh" "$INPUT_CSV" "$out_dir" "$DATA_DIR"
+  bash "$ROOT_DIR/scripts/alignment/run_alignment.sh" "$INPUT_CSV" "$out_dir" "$DATA_DIR"
 }
 
 gate_one() {
