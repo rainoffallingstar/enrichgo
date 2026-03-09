@@ -34,8 +34,9 @@ jobs:
         shell: bash
         run: |
           Rscript -e 'if (!requireNamespace("BiocManager", quietly=TRUE)) install.packages("BiocManager", repos="https://cloud.r-project.org")'
-          Rscript -e 'BiocManager::install(c("clusterProfiler","org.Hs.eg.db","BiocParallel"), ask=FALSE, update=FALSE)'
+          Rscript -e 'options(repos = BiocManager::repositories()); BiocManager::install(c("BiocParallel","org.Hs.eg.db","clusterProfiler"), ask=FALSE, update=FALSE, dependencies=TRUE, Ncpus=2)'
           Rscript -e 'install.packages("jsonlite", repos="https://cloud.r-project.org")'
+          Rscript -e 'pkgs <- c("clusterProfiler","org.Hs.eg.db","BiocParallel","jsonlite"); missing <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly=TRUE)]; if (length(missing) > 0) stop(paste("missing R packages:", paste(missing, collapse=",")))'
 
       - name: Unit tests
         run: go test ./...
