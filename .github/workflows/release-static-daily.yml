@@ -1,0 +1,114 @@
+name: release-static-daily
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-release-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  build_and_release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: "Guard: release only from main"
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "Refusing to publish release from non-main ref: ${GITHUB_REF}"
+            exit 1
+          fi
+
+      - name: Compute tag (UTC date)
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$(date -u +%Y-%m-%d)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Create/update tag on current commit
+        shell: bash
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --force --tags origin
+          git tag -f "$TAG" "$GITHUB_SHA"
+          git push -f origin "refs/tags/$TAG"
+
+      - name: Build static binaries (CGO_ENABLED=0)
+        shell: bash
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist
+
+          ldflags="-s -w"
+
+          build_one() {
+            local goos="$1"
+            local goarch="$2"
+            local ext=""
+            if [[ "$goos" == "windows" ]]; then
+              ext=".exe"
+            fi
+            local base="enrichgo_${TAG}_${goos}_${goarch}"
+            local bin="dist/${base}${ext}"
+
+            echo "Building $bin"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+              go build -trimpath -ldflags "$ldflags" -o "$bin" .
+
+            if [[ "$goos" == "windows" ]]; then
+              (cd dist && zip -q "${base}.zip" "${base}${ext}")
+              rm -f "$bin"
+            else
+              (cd dist && tar -czf "${base}.tar.gz" "${base}${ext}")
+              rm -f "$bin"
+            fi
+          }
+
+          build_one linux amd64
+          build_one linux arm64
+          build_one darwin amd64
+          build_one darwin arm64
+          build_one windows amd64
+
+          (cd dist && sha256sum *.tar.gz *.zip > SHA256SUMS)
+
+      - name: Create/update GitHub Release (same tag per day)
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ steps.tag.outputs.tag }}
+          name: enrichgo ${{ steps.tag.outputs.tag }}
+          allowUpdates: true
+          replacesArtifacts: true
+          artifactErrorsFailBuild: true
+          artifacts: dist/*.tar.gz,dist/*.zip,dist/SHA256SUMS
+          body: |
+            Daily static builds (CGO_ENABLED=0).
+            Commit: ${{ github.sha }}
