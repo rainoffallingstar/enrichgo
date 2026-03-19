@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -218,18 +220,55 @@ func runCommandWithMetrics(binary string, args []string) (*benchMetrics, error) 
 		Seconds:  time.Since(start).Seconds(),
 		MaxRSSKB: -1,
 	}
-	if usage, ok := cmd.ProcessState.SysUsage().(*syscall.Rusage); ok {
-		maxRSSKB := int(usage.Maxrss)
-		// On macOS Maxrss is bytes; Linux is KB. Heuristic keeps values consistent in KB.
-		if maxRSSKB > 0 && maxRSSKB < 1024 {
-			metrics.MaxRSSKB = maxRSSKB
-		} else if maxRSSKB > 1024*1024*64 {
-			metrics.MaxRSSKB = maxRSSKB / 1024
-		} else {
-			metrics.MaxRSSKB = maxRSSKB
-		}
+	if maxKB, ok := maxRSSKBFromSysUsage(cmd.ProcessState.SysUsage()); ok {
+		metrics.MaxRSSKB = maxKB
 	}
 	return metrics, nil
+}
+
+func maxRSSKBFromSysUsage(u any) (int, bool) {
+	ru, ok := u.(*syscall.Rusage)
+	if !ok || ru == nil {
+		return 0, false
+	}
+
+	// syscall.Rusage differs across platforms; avoid direct field access (e.g. Windows lacks Maxrss).
+	v := reflect.ValueOf(ru).Elem()
+	f := v.FieldByName("Maxrss")
+	if !f.IsValid() {
+		return 0, false
+	}
+
+	var max int64
+	switch f.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		max = f.Int()
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		max = int64(f.Uint())
+	default:
+		return 0, false
+	}
+	if max <= 0 {
+		return 0, false
+	}
+
+	// Normalize to KB.
+	if runtime.GOOS == "darwin" {
+		return int(max / 1024), true
+	}
+	if runtime.GOOS == "linux" {
+		return int(max), true
+	}
+
+	// Fallback heuristic for other platforms.
+	maxRSSKB := int(max)
+	if maxRSSKB > 0 && maxRSSKB < 1024 {
+		return maxRSSKB, true
+	}
+	if maxRSSKB > 1024*1024*64 {
+		return maxRSSKB / 1024, true
+	}
+	return maxRSSKB, true
 }
 
 func deriveOutputPath(path, suffix string) string {
