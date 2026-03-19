@@ -30,6 +30,17 @@ go build -o enrichgo .
 ./enrichgo download -d go -s hsa -ont BP -o data/
 ```
 
+也可以把“通路数据库 + ID 映射”打包到单个 SQLite 文件（便于离线分发与复用）：
+
+```bash
+# 打包所有通路库（KEGG/GO/Reactome/MSigDB）+ 离线 ID 映射到一个文件
+./enrichgo download -d all -s hsa -ont ALL -c all --db data/enrichgo.db --db-only --idmaps --idmaps-level extended
+```
+
+说明：
+- `--idmaps-level basic`：只用 KEGG list/link（更快、更小，但覆盖可能不如 extended）
+- `--idmaps-level extended`：使用 NCBI + UniProt 官方映射（更全，但耗时/体积更大）
+
 ### 3) 运行 ORA / GSEA
 
 ```bash
@@ -46,6 +57,13 @@ go build -o enrichgo .
   -d kegg -s hsa \
   -rank-col logFC -nPerm 1000 \
   -o /tmp/gsea_kegg.tsv
+```
+
+使用 SQLite 离线包运行时加 `--db`：
+
+```bash
+./enrichgo enrich -i test-data/DE_results.csv -d kegg -s hsa --db data/enrichgo.db -o /tmp/ora_kegg.tsv
+./enrichgo gsea   -i test-data/DE_results.csv -d go   -s hsa --db data/enrichgo.db -o /tmp/gsea_go.tsv
 ```
 
 ## Go / R 运行模式

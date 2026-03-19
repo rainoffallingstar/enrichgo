@@ -1,16 +1,19 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"enrichgo/pkg/analysis"
 	"enrichgo/pkg/annotation"
 	"enrichgo/pkg/database"
 	"enrichgo/pkg/io"
+	"enrichgo/pkg/store"
 )
 
 // enrichCmd ORA 富集分析命令
@@ -18,6 +21,7 @@ type enrichCmd struct {
 	inputFile    string
 	outputFile   string
 	dataDir      string
+	dbPath       string
 	universeFile string
 	database     string
 	species      string
@@ -57,6 +61,7 @@ func runEnrich(cmd *flag.FlagSet) {
 	cmd.StringVar(&c.inputFile, "i", "", "Input gene list file (required)")
 	cmd.StringVar(&c.outputFile, "o", "enrichment_result.tsv", "Output file")
 	cmd.StringVar(&c.dataDir, "data-dir", "data", "Database cache directory")
+	cmd.StringVar(&c.dbPath, "db", "", "Optional SQLite cache DB path (offline bundle). When set, gene sets + ID mappings are loaded from this DB")
 	cmd.StringVar(&c.universeFile, "universe-file", "", "Optional background gene list file (one gene per line)")
 	cmd.StringVar(&c.database, "d", "kegg", "Database: kegg, go, reactome, msigdb, custom")
 	cmd.StringVar(&c.species, "s", "hsa", "Species code (e.g., hsa, mmu)")
@@ -127,6 +132,17 @@ func runEnrich(cmd *flag.FlagSet) {
 		return
 	}
 
+	var st *store.SQLiteStore
+	if strings.TrimSpace(c.dbPath) != "" {
+		var err error
+		st, err = store.OpenSQLite(c.dbPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error opening sqlite db: %v\n", err)
+			os.Exit(1)
+		}
+		defer st.Close()
+	}
+
 	// 1. 读取输入基因列表
 	fmt.Println("Reading input genes...")
 
@@ -187,7 +203,12 @@ func runEnrich(cmd *flag.FlagSet) {
 	detectedType := annotation.BatchDetectIDType(input.Genes)
 	if shouldConvert && detectedType != annotation.IDUnknown && detectedType != targetIDType {
 		fmt.Printf("Detected ID type: %s, converting to %s...\n", detectedType, targetIDType)
-		converter := annotation.NewKEGGIDConverter(c.dataDir)
+		var converter annotation.IDConverter
+		if st != nil {
+			converter = annotation.NewSQLiteIDConverter(st)
+		} else {
+			converter = annotation.NewKEGGIDConverter(c.dataDir)
+		}
 
 		// 转换全部基因（包括背景）
 		convertedAll, allMapping, err := annotation.ConvertGeneID(input.AllGenes, targetIDType, c.species, converter)
@@ -239,10 +260,18 @@ func runEnrich(cmd *flag.FlagSet) {
 		}
 	}
 	if len(displayGeneMap) == 0 && strings.EqualFold(c.database, "kegg") {
-		idmapPath := filepath.Join(c.dataDir, fmt.Sprintf("kegg_%s_idmap.tsv", c.species))
-		if m, err := loadEntrezSymbolMapFromIDMap(idmapPath); err == nil {
-			for k, v := range m {
-				displayGeneMap[k] = v
+		if st != nil {
+			if m, err := loadEntrezSymbolMapFromSQLite(st, c.species); err == nil {
+				for k, v := range m {
+					displayGeneMap[k] = v
+				}
+			}
+		} else {
+			idmapPath := filepath.Join(c.dataDir, fmt.Sprintf("kegg_%s_idmap.tsv", c.species))
+			if m, err := loadEntrezSymbolMapFromIDMap(idmapPath); err == nil {
+				for k, v := range m {
+					displayGeneMap[k] = v
+				}
 			}
 		}
 	}
@@ -304,99 +333,161 @@ func runEnrich(cmd *flag.FlagSet) {
 
 	switch c.database {
 	case "kegg":
-		data, err := database.LoadOrDownloadKEGG(c.species, c.dataDir)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error loading KEGG data: %v\n", err)
-			os.Exit(1)
-		}
-		if data == nil {
-			fmt.Fprintln(os.Stderr, "Error: no KEGG data available")
-			os.Exit(1)
-		}
-		for _, pw := range data.Pathways {
-			gs := &analysis.GeneSet{
-				ID:          pw.ID,
-				Name:        pw.Name,
-				Genes:       pw.Genes,
-				Description: pw.Description,
+		if st != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			sets, _, err := st.LoadGeneSets(ctx, store.GeneSetFilter{DB: "kegg", Species: c.species})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error loading KEGG from sqlite: %v\n", err)
+				os.Exit(1)
 			}
-			geneSets = append(geneSets, gs)
+			geneSets = analysis.GeneSets(sets)
+		} else {
+			data, err := database.LoadOrDownloadKEGG(c.species, c.dataDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error loading KEGG data: %v\n", err)
+				os.Exit(1)
+			}
+			if data == nil {
+				fmt.Fprintln(os.Stderr, "Error: no KEGG data available")
+				os.Exit(1)
+			}
+			for _, pw := range data.Pathways {
+				gs := &analysis.GeneSet{
+					ID:          pw.ID,
+					Name:        pw.Name,
+					Genes:       pw.Genes,
+					Description: pw.Description,
+				}
+				geneSets = append(geneSets, gs)
+			}
 		}
 
 	case "go":
-		data, err := database.LoadOrDownloadGO(c.species, c.ontology, c.dataDir)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error loading GO data: %v\n", err)
-			os.Exit(1)
-		}
-		annotatedGenes := make(map[string]bool, len(data.Gene2Terms))
-		for gene, terms := range data.Gene2Terms {
-			if len(terms) > 0 {
-				annotatedGenes[gene] = true
-			}
-		}
-		if len(annotatedGenes) == 0 {
-			fmt.Fprintln(os.Stderr, "Error: GO annotation background is empty")
-			os.Exit(1)
-		}
-		if c.universeFile == "" {
-			filteredSig := make([]string, 0, len(input.Genes))
-			for _, g := range input.Genes {
-				if annotatedGenes[g] {
-					filteredSig = append(filteredSig, g)
-				}
-			}
-			if len(filteredSig) != len(input.Genes) {
-				fmt.Printf("GO annotation filter: kept %d/%d significant genes\n", len(filteredSig), len(input.Genes))
-			}
-			input.Genes = filteredSig
-			if len(input.Genes) == 0 {
-				fmt.Fprintln(os.Stderr, "Error: no significant genes remain after GO annotation filter")
+		if st != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			sets, _, err := st.LoadGeneSets(ctx, store.GeneSetFilter{DB: "go", Species: c.species, Ontology: c.ontology})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error loading GO from sqlite: %v\n", err)
 				os.Exit(1)
 			}
-			// 默认口径：GO ORA 背景使用可注释基因全集。
-			for gene := range annotatedGenes {
-				forcedUniverse = append(forcedUniverse, gene)
-			}
-		}
-		// 构建倒排索引 termID -> genes
-		term2genes := make(map[string]map[string]bool)
-		for gene, terms := range data.Gene2Terms {
-			for _, termID := range terms {
-				if term2genes[termID] == nil {
-					term2genes[termID] = make(map[string]bool)
+			geneSets = analysis.GeneSets(sets)
+			annotatedGenes := make(map[string]bool)
+			for _, gs := range geneSets {
+				for gene := range gs.Genes {
+					annotatedGenes[gene] = true
 				}
-				term2genes[termID][gene] = true
 			}
-		}
-		for termID, term := range data.Terms {
-			gs := &analysis.GeneSet{
-				ID:          termID,
-				Name:        term.Name,
-				Genes:       term2genes[termID],
-				Description: term.Definition,
+			if len(annotatedGenes) == 0 {
+				fmt.Fprintln(os.Stderr, "Error: GO annotation background is empty")
+				os.Exit(1)
 			}
-			geneSets = append(geneSets, gs)
+			if c.universeFile == "" {
+				filteredSig := make([]string, 0, len(input.Genes))
+				for _, g := range input.Genes {
+					if annotatedGenes[g] {
+						filteredSig = append(filteredSig, g)
+					}
+				}
+				if len(filteredSig) != len(input.Genes) {
+					fmt.Printf("GO annotation filter: kept %d/%d significant genes\n", len(filteredSig), len(input.Genes))
+				}
+				input.Genes = filteredSig
+				if len(input.Genes) == 0 {
+					fmt.Fprintln(os.Stderr, "Error: no significant genes remain after GO annotation filter")
+					os.Exit(1)
+				}
+				for gene := range annotatedGenes {
+					forcedUniverse = append(forcedUniverse, gene)
+				}
+			}
+		} else {
+			data, err := database.LoadOrDownloadGO(c.species, c.ontology, c.dataDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error loading GO data: %v\n", err)
+				os.Exit(1)
+			}
+			annotatedGenes := make(map[string]bool, len(data.Gene2Terms))
+			for gene, terms := range data.Gene2Terms {
+				if len(terms) > 0 {
+					annotatedGenes[gene] = true
+				}
+			}
+			if len(annotatedGenes) == 0 {
+				fmt.Fprintln(os.Stderr, "Error: GO annotation background is empty")
+				os.Exit(1)
+			}
+			if c.universeFile == "" {
+				filteredSig := make([]string, 0, len(input.Genes))
+				for _, g := range input.Genes {
+					if annotatedGenes[g] {
+						filteredSig = append(filteredSig, g)
+					}
+				}
+				if len(filteredSig) != len(input.Genes) {
+					fmt.Printf("GO annotation filter: kept %d/%d significant genes\n", len(filteredSig), len(input.Genes))
+				}
+				input.Genes = filteredSig
+				if len(input.Genes) == 0 {
+					fmt.Fprintln(os.Stderr, "Error: no significant genes remain after GO annotation filter")
+					os.Exit(1)
+				}
+				// 默认口径：GO ORA 背景使用可注释基因全集。
+				for gene := range annotatedGenes {
+					forcedUniverse = append(forcedUniverse, gene)
+				}
+			}
+			// 构建倒排索引 termID -> genes
+			term2genes := make(map[string]map[string]bool)
+			for gene, terms := range data.Gene2Terms {
+				for _, termID := range terms {
+					if term2genes[termID] == nil {
+						term2genes[termID] = make(map[string]bool)
+					}
+					term2genes[termID][gene] = true
+				}
+			}
+			for termID, term := range data.Terms {
+				gs := &analysis.GeneSet{
+					ID:          termID,
+					Name:        term.Name,
+					Genes:       term2genes[termID],
+					Description: term.Definition,
+				}
+				geneSets = append(geneSets, gs)
+			}
 		}
 
 	case "reactome":
-		data, err := database.LoadOrDownloadReactome(c.species, c.dataDir)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error loading Reactome data: %v\n", err)
-			os.Exit(1)
-		}
-		if data == nil || len(data.Pathways) == 0 {
-			fmt.Fprintln(os.Stderr, "Error: no Reactome data available")
-			os.Exit(1)
-		}
-		for _, pw := range data.Pathways {
-			gs := &analysis.GeneSet{
-				ID:          pw.ID,
-				Name:        pw.Name,
-				Genes:       pw.Genes,
-				Description: pw.Description,
+		if st != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			sets, _, err := st.LoadGeneSets(ctx, store.GeneSetFilter{DB: "reactome", Species: c.species})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error loading Reactome from sqlite: %v\n", err)
+				os.Exit(1)
 			}
-			geneSets = append(geneSets, gs)
+			geneSets = analysis.GeneSets(sets)
+		} else {
+			data, err := database.LoadOrDownloadReactome(c.species, c.dataDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error loading Reactome data: %v\n", err)
+				os.Exit(1)
+			}
+			if data == nil || len(data.Pathways) == 0 {
+				fmt.Fprintln(os.Stderr, "Error: no Reactome data available")
+				os.Exit(1)
+			}
+			for _, pw := range data.Pathways {
+				gs := &analysis.GeneSet{
+					ID:          pw.ID,
+					Name:        pw.Name,
+					Genes:       pw.Genes,
+					Description: pw.Description,
+				}
+				geneSets = append(geneSets, gs)
+			}
 		}
 
 	case "msigdb":
@@ -405,12 +496,32 @@ func runEnrich(cmd *flag.FlagSet) {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
-		sets, err := database.LoadOrDownloadMSigDBCollections(collections, c.dataDir)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error loading MSigDB: %v\n", err)
-			os.Exit(1)
+		if st != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			seen := make(map[string]bool)
+			for _, col := range collections {
+				sets, _, err := st.LoadGeneSets(ctx, store.GeneSetFilter{DB: "msigdb", Species: c.species, Collection: string(col)})
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error loading MSigDB from sqlite: %v\n", err)
+					os.Exit(1)
+				}
+				for _, gs := range sets {
+					if gs == nil || seen[gs.ID] {
+						continue
+					}
+					seen[gs.ID] = true
+					geneSets = append(geneSets, gs)
+				}
+			}
+		} else {
+			sets, err := database.LoadOrDownloadMSigDBCollections(collections, c.dataDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error loading MSigDB: %v\n", err)
+				os.Exit(1)
+			}
+			geneSets = sets
 		}
-		geneSets = sets
 
 	case "custom":
 		if c.gmtFile == "" {
@@ -541,6 +652,44 @@ func runEnrich(cmd *flag.FlagSet) {
 	}
 
 	fmt.Println("Done!")
+}
+
+func loadEntrezSymbolMapFromSQLite(st *store.SQLiteStore, species string) (map[string]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	rows, err := st.DB().QueryContext(ctx, `
+		SELECT from_id, to_id
+		FROM idmap
+		WHERE species=? AND from_type=? AND to_type=?
+	`, strings.ToLower(strings.TrimSpace(species)), string(annotation.IDEntrez), string(annotation.IDSymbol))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	m := make(map[string]string)
+	for rows.Next() {
+		var entrez, sym string
+		if err := rows.Scan(&entrez, &sym); err != nil {
+			return nil, err
+		}
+		entrez = strings.TrimSpace(entrez)
+		sym = strings.TrimSpace(sym)
+		if entrez == "" || sym == "" {
+			continue
+		}
+		if _, ok := m[entrez]; !ok {
+			m[entrez] = sym
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(m) == 0 {
+		return nil, fmt.Errorf("empty ENTREZ->SYMBOL mapping in sqlite for %s", species)
+	}
+	return m, nil
 }
 
 // 转换结果格式

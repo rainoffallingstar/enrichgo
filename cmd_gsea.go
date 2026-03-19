@@ -1,17 +1,20 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"enrichgo/pkg/analysis"
 	"enrichgo/pkg/annotation"
 	"enrichgo/pkg/database"
 	"enrichgo/pkg/io"
+	"enrichgo/pkg/store"
 )
 
 // gseaCmd GSEA 分析命令
@@ -19,6 +22,7 @@ type gseaCmd struct {
 	inputFile        string
 	outputFile       string
 	dataDir          string
+	dbPath           string
 	database         string
 	species          string
 	ontology         string
@@ -53,6 +57,7 @@ func runGSEA(cmd *flag.FlagSet) {
 	cmd.StringVar(&c.inputFile, "i", "", "Input ranked gene file (required)")
 	cmd.StringVar(&c.outputFile, "o", "gsea_result.tsv", "Output file")
 	cmd.StringVar(&c.dataDir, "data-dir", "data", "Database cache directory")
+	cmd.StringVar(&c.dbPath, "db", "", "Optional SQLite cache DB path (offline bundle). When set, gene sets + ID mappings are loaded from this DB")
 	cmd.StringVar(&c.database, "d", "kegg", "Database: kegg, go, reactome, msigdb, custom")
 	cmd.StringVar(&c.species, "s", "hsa", "Species code (e.g., hsa, mmu)")
 	cmd.StringVar(&c.ontology, "ont", "BP", "GO ontology: BP, MF, CC")
@@ -115,6 +120,17 @@ func runGSEA(cmd *flag.FlagSet) {
 		return
 	}
 
+	var st *store.SQLiteStore
+	if strings.TrimSpace(c.dbPath) != "" {
+		var err error
+		st, err = store.OpenSQLite(c.dbPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error opening sqlite db: %v\n", err)
+			os.Exit(1)
+		}
+		defer st.Close()
+	}
+
 	// 1. 读取输入
 	fmt.Println("Reading input genes...")
 	var input *io.GeneInput
@@ -166,7 +182,12 @@ func runGSEA(cmd *flag.FlagSet) {
 		detectedType := annotation.BatchDetectIDType(input.Genes)
 		if shouldConvert && detectedType != annotation.IDUnknown && detectedType != targetIDType {
 			fmt.Printf("Detected ID type: %s, converting to %s...\n", detectedType, targetIDType)
-			converter := annotation.NewKEGGIDConverter(c.dataDir)
+			var converter annotation.IDConverter
+			if st != nil {
+				converter = annotation.NewSQLiteIDConverter(st)
+			} else {
+				converter = annotation.NewKEGGIDConverter(c.dataDir)
+			}
 			converted, mapping, err := annotation.ConvertGeneID(input.Genes, targetIDType, c.species, converter)
 			if err != nil {
 				if !c.allowIDFallback {
@@ -193,10 +214,18 @@ func runGSEA(cmd *flag.FlagSet) {
 		}
 	}
 	if len(displayGeneMap) == 0 && strings.EqualFold(c.database, "kegg") {
-		idmapPath := filepath.Join(c.dataDir, fmt.Sprintf("kegg_%s_idmap.tsv", c.species))
-		if m, err := loadEntrezSymbolMapFromIDMap(idmapPath); err == nil {
-			for k, v := range m {
-				displayGeneMap[k] = v
+		if st != nil {
+			if m, err := loadEntrezSymbolMapFromSQLite(st, c.species); err == nil {
+				for k, v := range m {
+					displayGeneMap[k] = v
+				}
+			}
+		} else {
+			idmapPath := filepath.Join(c.dataDir, fmt.Sprintf("kegg_%s_idmap.tsv", c.species))
+			if m, err := loadEntrezSymbolMapFromIDMap(idmapPath); err == nil {
+				for k, v := range m {
+					displayGeneMap[k] = v
+				}
 			}
 		}
 	}
@@ -231,69 +260,102 @@ func runGSEA(cmd *flag.FlagSet) {
 
 	switch c.database {
 	case "kegg":
-		data, err := database.LoadOrDownloadKEGG(c.species, c.dataDir)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error loading KEGG data: %v\n", err)
-			os.Exit(1)
-		}
-		if data == nil {
-			fmt.Fprintln(os.Stderr, "Error: no KEGG data available")
-			os.Exit(1)
-		}
-		for _, pw := range data.Pathways {
-			gs := &analysis.GeneSet{
-				ID:          pw.ID,
-				Name:        pw.Name,
-				Genes:       pw.Genes,
-				Description: pw.Description,
+		if st != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			sets, _, err := st.LoadGeneSets(ctx, store.GeneSetFilter{DB: "kegg", Species: c.species})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error loading KEGG from sqlite: %v\n", err)
+				os.Exit(1)
 			}
-			geneSets = append(geneSets, gs)
+			geneSets = analysis.GeneSets(sets)
+		} else {
+			data, err := database.LoadOrDownloadKEGG(c.species, c.dataDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error loading KEGG data: %v\n", err)
+				os.Exit(1)
+			}
+			if data == nil {
+				fmt.Fprintln(os.Stderr, "Error: no KEGG data available")
+				os.Exit(1)
+			}
+			for _, pw := range data.Pathways {
+				gs := &analysis.GeneSet{
+					ID:          pw.ID,
+					Name:        pw.Name,
+					Genes:       pw.Genes,
+					Description: pw.Description,
+				}
+				geneSets = append(geneSets, gs)
+			}
 		}
 
 	case "go":
-		data, err := database.LoadOrDownloadGO(c.species, c.ontology, c.dataDir)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error loading GO data: %v\n", err)
-			os.Exit(1)
-		}
-		// 构建倒排索引 termID -> genes
-		term2genes := make(map[string]map[string]bool)
-		for gene, terms := range data.Gene2Terms {
-			for _, termID := range terms {
-				if term2genes[termID] == nil {
-					term2genes[termID] = make(map[string]bool)
+		if st != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			sets, _, err := st.LoadGeneSets(ctx, store.GeneSetFilter{DB: "go", Species: c.species, Ontology: c.ontology})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error loading GO from sqlite: %v\n", err)
+				os.Exit(1)
+			}
+			geneSets = analysis.GeneSets(sets)
+		} else {
+			data, err := database.LoadOrDownloadGO(c.species, c.ontology, c.dataDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error loading GO data: %v\n", err)
+				os.Exit(1)
+			}
+			// 构建倒排索引 termID -> genes
+			term2genes := make(map[string]map[string]bool)
+			for gene, terms := range data.Gene2Terms {
+				for _, termID := range terms {
+					if term2genes[termID] == nil {
+						term2genes[termID] = make(map[string]bool)
+					}
+					term2genes[termID][gene] = true
 				}
-				term2genes[termID][gene] = true
 			}
-		}
-		for termID, term := range data.Terms {
-			gs := &analysis.GeneSet{
-				ID:          termID,
-				Name:        term.Name,
-				Genes:       term2genes[termID],
-				Description: term.Definition,
+			for termID, term := range data.Terms {
+				gs := &analysis.GeneSet{
+					ID:          termID,
+					Name:        term.Name,
+					Genes:       term2genes[termID],
+					Description: term.Definition,
+				}
+				geneSets = append(geneSets, gs)
 			}
-			geneSets = append(geneSets, gs)
 		}
 
 	case "reactome":
-		data, err := database.LoadOrDownloadReactome(c.species, c.dataDir)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error loading Reactome data: %v\n", err)
-			os.Exit(1)
-		}
-		if data == nil || len(data.Pathways) == 0 {
-			fmt.Fprintln(os.Stderr, "Error: no Reactome data available")
-			os.Exit(1)
-		}
-		for _, pw := range data.Pathways {
-			gs := &analysis.GeneSet{
-				ID:          pw.ID,
-				Name:        pw.Name,
-				Genes:       pw.Genes,
-				Description: pw.Description,
+		if st != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			sets, _, err := st.LoadGeneSets(ctx, store.GeneSetFilter{DB: "reactome", Species: c.species})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error loading Reactome from sqlite: %v\n", err)
+				os.Exit(1)
 			}
-			geneSets = append(geneSets, gs)
+			geneSets = analysis.GeneSets(sets)
+		} else {
+			data, err := database.LoadOrDownloadReactome(c.species, c.dataDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error loading Reactome data: %v\n", err)
+				os.Exit(1)
+			}
+			if data == nil || len(data.Pathways) == 0 {
+				fmt.Fprintln(os.Stderr, "Error: no Reactome data available")
+				os.Exit(1)
+			}
+			for _, pw := range data.Pathways {
+				gs := &analysis.GeneSet{
+					ID:          pw.ID,
+					Name:        pw.Name,
+					Genes:       pw.Genes,
+					Description: pw.Description,
+				}
+				geneSets = append(geneSets, gs)
+			}
 		}
 
 	case "msigdb":
@@ -302,12 +364,32 @@ func runGSEA(cmd *flag.FlagSet) {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
-		sets, err := database.LoadOrDownloadMSigDBCollections(collections, c.dataDir)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error loading MSigDB: %v\n", err)
-			os.Exit(1)
+		if st != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			seen := make(map[string]bool)
+			for _, col := range collections {
+				sets, _, err := st.LoadGeneSets(ctx, store.GeneSetFilter{DB: "msigdb", Species: c.species, Collection: string(col)})
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error loading MSigDB from sqlite: %v\n", err)
+					os.Exit(1)
+				}
+				for _, gs := range sets {
+					if gs == nil || seen[gs.ID] {
+						continue
+					}
+					seen[gs.ID] = true
+					geneSets = append(geneSets, gs)
+				}
+			}
+		} else {
+			sets, err := database.LoadOrDownloadMSigDBCollections(collections, c.dataDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error loading MSigDB: %v\n", err)
+				os.Exit(1)
+			}
+			geneSets = sets
 		}
-		geneSets = sets
 
 	case "custom":
 		if c.gmtFile == "" {

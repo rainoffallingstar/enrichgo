@@ -45,6 +45,12 @@ jobs:
       - name: Build
         run: go build -o enrichgo .
 
+      - name: Static build check (CGO_ENABLED=0)
+        shell: bash
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 go build -o /tmp/enrichgo-static .
+
       - name: Prepare KEGG-mappable input
         shell: bash
         run: |

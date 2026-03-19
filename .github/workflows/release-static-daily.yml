@@ -2,6 +2,15 @@ name: release-static-daily
 
 on:
   workflow_dispatch:
+    inputs:
+      idmaps_level:
+        description: "SQLite DB ID mapping level: basic or extended (extended downloads large upstream dumps)"
+        required: false
+        default: "basic"
+      species:
+        description: "Species code for packaged SQLite DB (e.g., hsa, mmu)"
+        required: false
+        default: "hsa"
   push:
     branches:
       - main
@@ -16,7 +25,7 @@ concurrency:
 jobs:
   build_and_release:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 180
 
     steps:
       - name: Checkout
@@ -98,7 +107,34 @@ jobs:
           build_one darwin arm64
           build_one windows amd64
 
-          (cd dist && sha256sum *.tar.gz *.zip > SHA256SUMS)
+      - name: Build packaged SQLite DB (offline bundle)
+        shell: bash
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          SPECIES: ${{ github.event.inputs.species || 'hsa' }}
+          IDMAPS_LEVEL: ${{ github.event.inputs.idmaps_level || 'basic' }}
+        run: |
+          set -euo pipefail
+
+          echo "Building SQLite DB for species=${SPECIES} idmaps_level=${IDMAPS_LEVEL}"
+
+          CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /tmp/enrichgo .
+
+          db_base="enrichgo_db_${TAG}_${SPECIES}_${IDMAPS_LEVEL}.db"
+          db_path="dist/${db_base}"
+
+          /tmp/enrichgo download \
+            -d all -s "${SPECIES}" -ont ALL -c all \
+            --db "${db_path}" --db-only \
+            --idmaps --idmaps-level "${IDMAPS_LEVEL}"
+
+          gzip -9 "${db_path}"
+
+      - name: Checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum *.tar.gz *.zip *.db.gz > SHA256SUMS)
 
       - name: Create/update GitHub Release (same tag per day)
         uses: ncipollo/release-action@v1
@@ -108,7 +144,8 @@ jobs:
           allowUpdates: true
           replacesArtifacts: true
           artifactErrorsFailBuild: true
-          artifacts: dist/*.tar.gz,dist/*.zip,dist/SHA256SUMS
+          artifacts: dist/*.tar.gz,dist/*.zip,dist/*.db.gz,dist/SHA256SUMS
           body: |
             Daily static builds (CGO_ENABLED=0).
+            Includes a packaged SQLite offline bundle: `enrichgo_db_<tag>_<species>_<idmaps_level>.db.gz` (defaults: species=hsa, idmaps_level=basic).
             Commit: ${{ github.sha }}
