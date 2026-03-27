@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"enrichgo/pkg/netutil"
 )
 
 var uniProtOrgByTaxID = map[int]string{
@@ -41,7 +43,7 @@ func StreamUniProtIDMappingSelected(taxID int, client HTTPClient, emitUniProtToE
 		"https://ftp.uniprot.org/pub/databases/uniprot/knowledgebase/idmapping/idmapping_selected.tab.gz",
 	)
 	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Minute}
+		client = netutil.NewClient(netutil.Options{Timeout: 10 * time.Minute})
 	}
 
 	var lastErr error

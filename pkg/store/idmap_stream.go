@@ -12,6 +12,10 @@ type IDMapEmit func(from, to string) error
 
 // ReplaceIDMapStream replaces id mappings for (species, source, fromType, toType) using a streaming producer.
 // It is intended for very large mapping sources (NCBI/UniProt), avoiding holding all pairs in memory.
+//
+// Atomicity guarantee:
+// - delete and insert happen in one transaction
+// - on producer/insert error the transaction is rolled back, so old data is preserved
 func (s *SQLiteStore) ReplaceIDMapStream(ctx context.Context, species, source, fromType, toType string, produce func(emit IDMapEmit) error) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("store not initialized")
@@ -24,7 +28,13 @@ func (s *SQLiteStore) ReplaceIDMapStream(ctx context.Context, species, source, f
 		return fmt.Errorf("invalid idmap stream args")
 	}
 
-	if _, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM idmap WHERE species=? AND source=? AND from_type=? AND to_type=?`,
 		species, source, fromType, toType,
 	); err != nil {
@@ -32,51 +42,14 @@ func (s *SQLiteStore) ReplaceIDMapStream(ctx context.Context, species, source, f
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
-
-	const batchSize = 50000
-	var tx *sql.Tx
-	var stmt *sql.Stmt
-	rowsInBatch := 0
-
-	openBatch := func() error {
-		var err error
-		tx, err = s.db.BeginTx(ctx, &sql.TxOptions{})
-		if err != nil {
-			return err
-		}
-		stmt, err = tx.PrepareContext(ctx, `
-			INSERT OR IGNORE INTO idmap (species, from_type, from_id, to_type, to_id, source, downloaded_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?)
-		`)
-		if err != nil {
-			_ = tx.Rollback()
-			tx = nil
-			return err
-		}
-		rowsInBatch = 0
-		return nil
-	}
-
-	commitBatch := func() error {
-		if stmt != nil {
-			_ = stmt.Close()
-			stmt = nil
-		}
-		if tx != nil {
-			if err := tx.Commit(); err != nil {
-				_ = tx.Rollback()
-				tx = nil
-				return err
-			}
-			tx = nil
-		}
-		return nil
-	}
-
-	if err := openBatch(); err != nil {
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT OR IGNORE INTO idmap (species, from_type, from_id, to_type, to_id, source, downloaded_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
 		return err
 	}
-	defer func() { _ = commitBatch() }()
+	defer stmt.Close()
 
 	emit := func(from, to string) error {
 		from = strings.TrimSpace(from)
@@ -87,19 +60,11 @@ func (s *SQLiteStore) ReplaceIDMapStream(ctx context.Context, species, source, f
 		if _, err := stmt.ExecContext(ctx, species, fromType, from, toType, to, source, now); err != nil {
 			return err
 		}
-		rowsInBatch++
-		if rowsInBatch >= batchSize {
-			if err := commitBatch(); err != nil {
-				return err
-			}
-			return openBatch()
-		}
 		return nil
 	}
 
 	if err := produce(emit); err != nil {
 		return err
 	}
-	return commitBatch()
+	return tx.Commit()
 }
-

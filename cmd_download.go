@@ -16,15 +16,15 @@ import (
 
 // downloadCmd 数据库下载命令
 type downloadCmd struct {
-	database   string
-	species    string
-	ontology   string
-	collection string
-	outputDir  string
-	all        bool
-	dbPath     string
-	dbOnly     bool
-	withIDMaps bool
+	database    string
+	species     string
+	ontology    string
+	collection  string
+	outputDir   string
+	all         bool
+	dbPath      string
+	dbOnly      bool
+	withIDMaps  bool
 	idMapsLevel string
 }
 
@@ -70,6 +70,8 @@ func runDownload(cmd *flag.FlagSet) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
 
+	snapshotVersion := sqliteSnapshotVersion(time.Now())
+
 	runKEGG := func() {
 		fmt.Printf("Downloading KEGG data for %s...\n", c.species)
 		data, err := database.DownloadKEGG(c.species, outputDir)
@@ -80,7 +82,7 @@ func runDownload(cmd *flag.FlagSet) {
 		fmt.Printf("Downloaded %d pathways\n", len(data.Pathways))
 		if st != nil {
 			sets := keggToGeneSets(data)
-			if err := st.ReplaceGeneSets(ctx, store.GeneSetFilter{DB: "kegg", Species: c.species}, string(annotation.IDEntrez), sets, "-"); err != nil {
+			if err := st.ReplaceGeneSets(ctx, store.GeneSetFilter{DB: "kegg", Species: c.species}, string(annotation.IDEntrez), sets, snapshotVersion); err != nil {
 				fmt.Fprintf(os.Stderr, "Error writing KEGG to sqlite: %v\n", err)
 				os.Exit(1)
 			}
@@ -103,7 +105,7 @@ func runDownload(cmd *flag.FlagSet) {
 			fmt.Printf("Downloaded %d GO terms\n", len(data.Terms))
 			if st != nil {
 				sets := goToGeneSets(data)
-				if err := st.ReplaceGeneSets(ctx, store.GeneSetFilter{DB: "go", Species: c.species, Ontology: ont}, string(annotation.IDSymbol), sets, "-"); err != nil {
+				if err := st.ReplaceGeneSets(ctx, store.GeneSetFilter{DB: "go", Species: c.species, Ontology: ont}, string(annotation.IDSymbol), sets, snapshotVersion); err != nil {
 					fmt.Fprintf(os.Stderr, "Error writing GO to sqlite: %v\n", err)
 					os.Exit(1)
 				}
@@ -131,7 +133,7 @@ func runDownload(cmd *flag.FlagSet) {
 			}
 			total += len(sets)
 			if st != nil {
-				if err := st.ReplaceGeneSets(ctx, store.GeneSetFilter{DB: "msigdb", Species: c.species, Collection: string(col)}, string(annotation.IDSymbol), types.GeneSets(sets), "-"); err != nil {
+				if err := st.ReplaceGeneSets(ctx, store.GeneSetFilter{DB: "msigdb", Species: c.species, Collection: string(col)}, string(annotation.IDSymbol), types.GeneSets(sets), snapshotVersion); err != nil {
 					fmt.Fprintf(os.Stderr, "Error writing MSigDB to sqlite: %v\n", err)
 					os.Exit(1)
 				}
@@ -150,7 +152,7 @@ func runDownload(cmd *flag.FlagSet) {
 		fmt.Printf("Downloaded %d pathways\n", len(data.Pathways))
 		if st != nil {
 			sets := reactomeToGeneSets(data)
-			if err := st.ReplaceGeneSets(ctx, store.GeneSetFilter{DB: "reactome", Species: c.species}, string(annotation.IDSymbol), sets, "-"); err != nil {
+			if err := st.ReplaceGeneSets(ctx, store.GeneSetFilter{DB: "reactome", Species: c.species}, string(annotation.IDSymbol), sets, snapshotVersion); err != nil {
 				fmt.Fprintf(os.Stderr, "Error writing Reactome to sqlite: %v\n", err)
 				os.Exit(1)
 			}
@@ -202,6 +204,10 @@ func runDownload(cmd *flag.FlagSet) {
 	}
 
 	fmt.Println("Done!")
+}
+
+func sqliteSnapshotVersion(now time.Time) string {
+	return "snapshot-" + now.UTC().Format("20060102T150405Z")
 }
 
 func keggToGeneSets(data *database.KEGGData) types.GeneSets {

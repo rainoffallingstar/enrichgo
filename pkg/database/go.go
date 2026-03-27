@@ -8,6 +8,9 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
+
+	"enrichgo/pkg/netutil"
 )
 
 // goSpeciesMap KEGG 物种代码到 GO 注释文件名的映射
@@ -42,6 +45,8 @@ type GOTerm struct {
 	Parents    []string // 父term
 	Children   []string // 子term
 }
+
+var goHTTPClient = netutil.NewClient(netutil.Options{Timeout: 5 * time.Minute})
 
 // DownloadGO 下载 GO 注释数据
 // 需要提供物种代码和数据库来源
@@ -86,7 +91,8 @@ func DownloadGO(species, ontology, outputDir string) (*GOData, error) {
 func fetchGOOntology(data *GOData) error {
 	url := "http://purl.obolibrary.org/obo/go/go-basic.obo"
 
-	resp, err := http.Get(url)
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	resp, err := goHTTPClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -167,7 +173,8 @@ func fetchGOAnnotations(data *GOData, species string) error {
 	}
 
 	url := fmt.Sprintf("http://current.geneontology.org/annotations/%s.gaf.gz", filename)
-	resp, err := http.Get(url)
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	resp, err := goHTTPClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to download GO annotations: %v", err)
 	}
@@ -298,7 +305,7 @@ func LoadGO(filePath string) (*GOData, error) {
 	for _, gs := range sets {
 		data.Terms[gs.ID] = &GOTerm{
 			ID:         gs.ID,
-			Name:       gs.Name,
+			Name:       nameFromGMTGeneSet(gs),
 			Definition: gs.Description,
 		}
 		for gene := range gs.Genes {

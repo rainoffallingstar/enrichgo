@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       idmaps_level:
-        description: "SQLite DB ID mapping level: basic or extended (extended downloads large upstream dumps)"
+        description: "SQLite DB ID mapping level for packaged .db artifact: basic or extended"
         required: false
         default: "basic"
       species:
-        description: "Species code for packaged SQLite DB (e.g., hsa, mmu)"
+        description: "Species code for packaged .db artifact (e.g., hsa, mmu)"
         required: false
         default: "hsa"
   push:
@@ -25,7 +25,7 @@ concurrency:
 jobs:
   build_and_release:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 360
 
     steps:
       - name: Checkout
@@ -67,7 +67,44 @@ jobs:
           git tag -f "$TAG" "$GITHUB_SHA"
           git push -f origin "refs/tags/$TAG"
 
-      - name: Build static binaries (CGO_ENABLED=0)
+      - name: Build embedded SQLite DB for binaries (fixed profile)
+        shell: bash
+        env:
+          EMBED_SPECIES: hsa
+          EMBED_IDMAPS_LEVEL: basic
+        run: |
+          set -euo pipefail
+
+          echo "Preparing embedded SQLite DB for species=${EMBED_SPECIES} idmaps_level=${EMBED_IDMAPS_LEVEL}"
+          mkdir -p assets dist
+
+          # Build a bootstrap binary using repository seed DB, then refresh embed DB before final build.
+          CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /tmp/enrichgo-bootstrap .
+
+          /tmp/enrichgo-bootstrap download \
+            -d all -s "${EMBED_SPECIES}" -ont ALL -c all \
+            --db "assets/default_enrichgo.db" --db-only \
+            --idmaps --idmaps-level "${EMBED_IDMAPS_LEVEL}"
+
+          audit_output="$(/tmp/enrichgo-bootstrap db-audit --db "assets/default_enrichgo.db")"
+          echo "$audit_output"
+
+          extract_value() {
+            local key="$1"
+            echo "$audit_output" | awk -F= -v k="$key" '$1==k {print $2}' | tail -n1
+          }
+
+          status="$(extract_value status)"
+          geneset_rows="$(extract_value rows.geneset)"
+          geneset_gene_rows="$(extract_value rows.geneset_gene)"
+          idmap_rows="$(extract_value rows.idmap)"
+
+          [[ "$status" == "ok" ]]
+          [[ "${geneset_rows:-0}" -gt 0 ]]
+          [[ "${geneset_gene_rows:-0}" -gt 0 ]]
+          [[ "${idmap_rows:-0}" -gt 0 ]]
+
+      - name: Build static binaries (CGO_ENABLED=0; embed prepared DB)
         shell: bash
         env:
           TAG: ${{ steps.tag.outputs.tag }}
@@ -107,26 +144,29 @@ jobs:
           build_one darwin arm64
           build_one windows amd64
 
-      - name: Build packaged SQLite DB (offline bundle)
+      - name: Build packaged SQLite DB artifact
         shell: bash
         env:
           TAG: ${{ steps.tag.outputs.tag }}
           SPECIES: ${{ github.event.inputs.species || 'hsa' }}
           IDMAPS_LEVEL: ${{ github.event.inputs.idmaps_level || 'basic' }}
+          EMBED_SPECIES: hsa
+          EMBED_IDMAPS_LEVEL: basic
         run: |
           set -euo pipefail
-
-          echo "Building SQLite DB for species=${SPECIES} idmaps_level=${IDMAPS_LEVEL}"
-
-          CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /tmp/enrichgo .
 
           db_base="enrichgo_db_${TAG}_${SPECIES}_${IDMAPS_LEVEL}.db"
           db_path="dist/${db_base}"
 
-          /tmp/enrichgo download \
-            -d all -s "${SPECIES}" -ont ALL -c all \
-            --db "${db_path}" --db-only \
-            --idmaps --idmaps-level "${IDMAPS_LEVEL}"
+          if [[ "${SPECIES}" == "${EMBED_SPECIES}" && "${IDMAPS_LEVEL}" == "${EMBED_IDMAPS_LEVEL}" ]]; then
+            cp assets/default_enrichgo.db "${db_path}"
+          else
+            /tmp/enrichgo-bootstrap download \
+              -d all -s "${SPECIES}" -ont ALL -c all \
+              --db "${db_path}" --db-only \
+              --idmaps --idmaps-level "${IDMAPS_LEVEL}"
+            /tmp/enrichgo-bootstrap db-audit --db "${db_path}"
+          fi
 
           gzip -9 "${db_path}"
 
@@ -147,5 +187,6 @@ jobs:
           artifacts: dist/*.tar.gz,dist/*.zip,dist/*.db.gz,dist/SHA256SUMS
           body: |
             Daily static builds (CGO_ENABLED=0).
-            Includes a packaged SQLite offline bundle: `enrichgo_db_<tag>_<species>_<idmaps_level>.db.gz` (defaults: species=hsa, idmaps_level=basic).
+            Binaries embed a CI-built default SQLite DB with fixed profile: species=hsa, idmaps_level=basic.
+            Packaged offline DB artifact is configurable by workflow inputs: `enrichgo_db_<tag>_<species>_<idmaps_level>.db.gz`.
             Commit: ${{ github.sha }}

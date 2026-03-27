@@ -100,3 +100,34 @@ func TestLoadEntrezSymbolMapFromIDMap(t *testing.T) {
 		t.Fatalf("got[2]=%q, want EGFR", got["2"])
 	}
 }
+
+func TestResolveKEGGIDCacheMaxEntries(t *testing.T) {
+	prev, had := os.LookupEnv(envKEGGIDCacheMaxEntries)
+	t.Cleanup(func() {
+		if had {
+			os.Setenv(envKEGGIDCacheMaxEntries, prev)
+		} else {
+			os.Unsetenv(envKEGGIDCacheMaxEntries)
+		}
+	})
+
+	os.Unsetenv(envKEGGIDCacheMaxEntries)
+	if v, ok, err := resolveKEGGIDCacheMaxEntries(0); err != nil || ok || v != 0 {
+		t.Fatalf("no flag/env: v=%d ok=%v err=%v", v, ok, err)
+	}
+
+	os.Setenv(envKEGGIDCacheMaxEntries, "123")
+	if v, ok, err := resolveKEGGIDCacheMaxEntries(0); err != nil || !ok || v != 123 {
+		t.Fatalf("env: v=%d ok=%v err=%v", v, ok, err)
+	}
+
+	os.Setenv(envKEGGIDCacheMaxEntries, "bad")
+	if _, ok, err := resolveKEGGIDCacheMaxEntries(0); err == nil || !ok {
+		t.Fatalf("invalid env should error")
+	}
+
+	os.Setenv(envKEGGIDCacheMaxEntries, "999")
+	if v, ok, err := resolveKEGGIDCacheMaxEntries(77); err != nil || !ok || v != 77 {
+		t.Fatalf("flag overrides env: v=%d ok=%v err=%v", v, ok, err)
+	}
+}

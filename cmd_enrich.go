@@ -42,6 +42,11 @@ type enrichCmd struct {
 	fdrThreshold     float64 // 数值过滤阈值（如 0.05）
 	useAllBackground bool    // 使用表格全部基因作为 ORA 背景
 	allowIDFallback  bool    // ID 转换失败时允许回退到原始 ID
+	idCacheMax       int     // KEGG ID 转换缓存上限（每个 bucket）
+	useEmbeddedDB    bool    // --db 未提供时是否使用嵌入的默认 SQLite
+	updateDB         bool    // 运行前是否先更新 SQLite 数据
+	updateDBIDMaps   bool    // 更新时是否同步刷新 ID 映射
+	updateDBIDLevel  string  // 更新时 ID 映射级别（basic/extended）
 	// 方向性分析参数
 	splitByDirection bool    // 是否按方向分别做 ORA
 	dirCol           string  // 方向列名
@@ -57,6 +62,7 @@ type enrichCmd struct {
 func runEnrich(cmd *flag.FlagSet) {
 	c := &enrichCmd{}
 	displayGeneMap := make(map[string]string) // result gene ID -> SYMBOL
+	var keggConv *annotation.KEGGIDConverter
 
 	cmd.StringVar(&c.inputFile, "i", "", "Input gene list file (required)")
 	cmd.StringVar(&c.outputFile, "o", "enrichment_result.tsv", "Output file")
@@ -82,6 +88,11 @@ func runEnrich(cmd *flag.FlagSet) {
 	cmd.Float64Var(&c.fdrThreshold, "fdr-threshold", 0.05, "FDR threshold for significant genes (used with --fdr-col)")
 	cmd.BoolVar(&c.useAllBackground, "use-all-background", true, "Use all genes in DEG table as ORA background (Universe)")
 	cmd.BoolVar(&c.allowIDFallback, "allow-id-fallback", false, "Continue with original IDs when ID conversion fails")
+	cmd.IntVar(&c.idCacheMax, "kegg-id-cache-max-entries", 0, "Max entries per KEGG ID conversion cache bucket. 0=default; <0=disable eviction. Env: "+envKEGGIDCacheMaxEntries)
+	cmd.BoolVar(&c.useEmbeddedDB, "use-embedded-db", true, "When --db is empty, use bundled embedded SQLite DB by default")
+	cmd.BoolVar(&c.updateDB, "update-db", false, "Before analysis, run download update into target SQLite DB")
+	cmd.BoolVar(&c.updateDBIDMaps, "update-db-idmaps", false, "When --update-db, also refresh offline ID mappings")
+	cmd.StringVar(&c.updateDBIDLevel, "update-db-idmaps-level", "basic", "When --update-db-idmaps, choose basic or extended")
 	// 方向性分析
 	cmd.BoolVar(&c.splitByDirection, "split-by-direction", true, "Run separate ORA for Up/Down regulated genes")
 	cmd.StringVar(&c.dirCol, "dir-col", "direction", "Column name for regulation direction")
@@ -94,6 +105,12 @@ func runEnrich(cmd *flag.FlagSet) {
 	cmd.StringVar(&c.benchmarkOut, "benchmark-out", "", "Benchmark report path (TSV). Default: derive from -o")
 
 	cmd.Parse(os.Args[2:])
+
+	keggCacheMax, applyKEGGCacheMax, err := resolveKEGGIDCacheMaxEntries(c.idCacheMax)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 
 	// 验证参数
 	if c.inputFile == "" {
@@ -113,16 +130,27 @@ func runEnrich(cmd *flag.FlagSet) {
 	}
 	if c.useR {
 		opts := &rRunOptions{
-			Command:    "enrich",
-			Database:   c.database,
-			Species:    c.species,
-			Ontology:   c.ontology,
-			Collection: c.collection,
-			InputFile:  c.inputFile,
-			OutputFile: c.outputFile,
-			DataDir:    c.dataDir,
-			NPerm:      1000,
-			Format:     c.format,
+			Command:          "enrich",
+			Database:         c.database,
+			Species:          c.species,
+			Ontology:         c.ontology,
+			Collection:       c.collection,
+			InputFile:        c.inputFile,
+			OutputFile:       c.outputFile,
+			DataDir:          c.dataDir,
+			NPerm:            1000,
+			Format:           c.format,
+			SigCol:           c.sigCol,
+			SigVal:           c.sigVal,
+			FDRCol:           c.fdrCol,
+			FDRThreshold:     c.fdrThreshold,
+			RankCol:          c.logFCCol,
+			SplitByDirection: c.splitByDirection,
+			DirCol:           c.dirCol,
+			UpVal:            c.upVal,
+			DownVal:          c.downVal,
+			LogFCCol:         c.logFCCol,
+			LogFCThreshold:   c.logFCThresh,
 		}
 		if err := runRMode(opts); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -133,9 +161,40 @@ func runEnrich(cmd *flag.FlagSet) {
 	}
 
 	var st *store.SQLiteStore
-	if strings.TrimSpace(c.dbPath) != "" {
+	effectiveDBPath := strings.TrimSpace(c.dbPath)
+	if effectiveDBPath == "" && c.useEmbeddedDB {
+		path, embedErr := ensureEmbeddedDefaultSQLiteDBFile()
+		if embedErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to prepare embedded SQLite DB (%s): %v\n", embeddedDefaultSQLiteSHA256(), embedErr)
+		} else {
+			effectiveDBPath = path
+			fmt.Printf("Using embedded SQLite DB: %s\n", effectiveDBPath)
+		}
+	}
+
+	if c.updateDB {
+		if effectiveDBPath == "" {
+			fmt.Fprintln(os.Stderr, "Error: --update-db requires --db or --use-embedded-db")
+			os.Exit(1)
+		}
+		fmt.Printf("Updating SQLite DB before analysis (db=%s, species=%s)...\n", c.database, c.species)
+		if err := runDownloadUpdateForDB(dbUpdateOptions{
+			Database:    c.database,
+			Species:     c.species,
+			Ontology:    c.ontology,
+			Collection:  c.collection,
+			DBPath:      effectiveDBPath,
+			WithIDMaps:  c.updateDBIDMaps,
+			IDMapsLevel: c.updateDBIDLevel,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "Error updating sqlite db: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	if effectiveDBPath != "" {
 		var err error
-		st, err = store.OpenSQLite(c.dbPath)
+		st, err = store.OpenSQLite(effectiveDBPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error opening sqlite db: %v\n", err)
 			os.Exit(1)
@@ -207,7 +266,12 @@ func runEnrich(cmd *flag.FlagSet) {
 		if st != nil {
 			converter = annotation.NewSQLiteIDConverter(st)
 		} else {
-			converter = annotation.NewKEGGIDConverter(c.dataDir)
+			kc := annotation.NewKEGGIDConverter(c.dataDir)
+			if applyKEGGCacheMax {
+				kc.SetMaxCacheEntries(keggCacheMax)
+			}
+			keggConv = kc
+			converter = kc
 		}
 
 		// 转换全部基因（包括背景）
@@ -651,6 +715,7 @@ func runEnrich(cmd *flag.FlagSet) {
 		os.Exit(1)
 	}
 
+	writeKEGGIDCacheMetricsIfRequested(keggConv)
 	fmt.Println("Done!")
 }
 
@@ -658,33 +723,30 @@ func loadEntrezSymbolMapFromSQLite(st *store.SQLiteStore, species string) (map[s
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	rows, err := st.DB().QueryContext(ctx, `
-		SELECT from_id, to_id
-		FROM idmap
-		WHERE species=? AND from_type=? AND to_type=?
-	`, strings.ToLower(strings.TrimSpace(species)), string(annotation.IDEntrez), string(annotation.IDSymbol))
+	scanned, err := st.ScanIDMap(
+		ctx,
+		strings.ToLower(strings.TrimSpace(species)),
+		string(annotation.IDEntrez),
+		string(annotation.IDSymbol),
+	)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
-	m := make(map[string]string)
-	for rows.Next() {
-		var entrez, sym string
-		if err := rows.Scan(&entrez, &sym); err != nil {
-			return nil, err
-		}
+	m := make(map[string]string, len(scanned))
+	for entrez, symbols := range scanned {
 		entrez = strings.TrimSpace(entrez)
-		sym = strings.TrimSpace(sym)
-		if entrez == "" || sym == "" {
+		if entrez == "" {
 			continue
 		}
-		if _, ok := m[entrez]; !ok {
+		for _, sym := range symbols {
+			sym = strings.TrimSpace(sym)
+			if sym == "" {
+				continue
+			}
 			m[entrez] = sym
+			break
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 	if len(m) == 0 {
 		return nil, fmt.Errorf("empty ENTREZ->SYMBOL mapping in sqlite for %s", species)

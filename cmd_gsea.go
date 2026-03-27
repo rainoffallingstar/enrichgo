@@ -44,6 +44,11 @@ type gseaCmd struct {
 	ranked           bool   // 是否已排序
 	rankCol          string // 排名列名（用于 DEG 表格）
 	allowIDFallback  bool   // ID 转换失败时允许回退到原始 ID
+	idCacheMax       int    // KEGG ID 转换缓存上限（每个 bucket）
+	useEmbeddedDB    bool   // --db 未提供时是否使用嵌入默认 SQLite
+	updateDB         bool   // 运行前是否先更新 SQLite 数据
+	updateDBIDMaps   bool   // 更新时是否同步刷新 ID 映射
+	updateDBIDLevel  string // 更新时 ID 映射级别（basic/extended）
 	debugRankedOut   string // 输出排序后的 ranked gene 列表
 	useR             bool
 	benchmark        bool
@@ -53,6 +58,7 @@ type gseaCmd struct {
 func runGSEA(cmd *flag.FlagSet) {
 	c := &gseaCmd{}
 	displayGeneMap := make(map[string]string) // result gene ID -> SYMBOL
+	var keggConv *annotation.KEGGIDConverter
 
 	cmd.StringVar(&c.inputFile, "i", "", "Input ranked gene file (required)")
 	cmd.StringVar(&c.outputFile, "o", "gsea_result.tsv", "Output file")
@@ -79,12 +85,23 @@ func runGSEA(cmd *flag.FlagSet) {
 	cmd.BoolVar(&c.ranked, "ranked", false, "Input is already ranked (descending)")
 	cmd.StringVar(&c.rankCol, "rank-col", "logFC", "Column name to use as ranking metric for GSEA (from DEG table)")
 	cmd.BoolVar(&c.allowIDFallback, "allow-id-fallback", false, "Continue with original IDs when ID conversion fails")
+	cmd.IntVar(&c.idCacheMax, "kegg-id-cache-max-entries", 0, "Max entries per KEGG ID conversion cache bucket. 0=default; <0=disable eviction. Env: "+envKEGGIDCacheMaxEntries)
+	cmd.BoolVar(&c.useEmbeddedDB, "use-embedded-db", true, "When --db is empty, use bundled embedded SQLite DB by default")
+	cmd.BoolVar(&c.updateDB, "update-db", false, "Before analysis, run download update into target SQLite DB")
+	cmd.BoolVar(&c.updateDBIDMaps, "update-db-idmaps", false, "When --update-db, also refresh offline ID mappings")
+	cmd.StringVar(&c.updateDBIDLevel, "update-db-idmaps-level", "basic", "When --update-db-idmaps, choose basic or extended")
 	cmd.StringVar(&c.debugRankedOut, "debug-ranked-out", "", "Write ranked genes after preprocessing to this TSV path")
 	cmd.BoolVar(&c.useR, "use-r", false, "Run analysis via R clusterProfiler baseline instead of Go implementation")
 	cmd.BoolVar(&c.benchmark, "benchmark", false, "Run both Go and R implementations and emit benchmark report")
 	cmd.StringVar(&c.benchmarkOut, "benchmark-out", "", "Benchmark report path (TSV). Default: derive from -o")
 
 	cmd.Parse(os.Args[2:])
+
+	keggCacheMax, applyKEGGCacheMax, resolveErr := resolveKEGGIDCacheMaxEntries(c.idCacheMax)
+	if resolveErr != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", resolveErr)
+		os.Exit(1)
+	}
 
 	// 验证参数
 	if c.inputFile == "" {
@@ -101,16 +118,18 @@ func runGSEA(cmd *flag.FlagSet) {
 	}
 	if c.useR {
 		opts := &rRunOptions{
-			Command:    "gsea",
-			Database:   c.database,
-			Species:    c.species,
-			Ontology:   c.ontology,
-			Collection: c.collection,
-			InputFile:  c.inputFile,
-			OutputFile: c.outputFile,
-			DataDir:    c.dataDir,
-			NPerm:      c.permutations,
-			Format:     c.format,
+			Command:          "gsea",
+			Database:         c.database,
+			Species:          c.species,
+			Ontology:         c.ontology,
+			Collection:       c.collection,
+			InputFile:        c.inputFile,
+			OutputFile:       c.outputFile,
+			DataDir:          c.dataDir,
+			NPerm:            c.permutations,
+			Format:           c.format,
+			RankCol:          c.rankCol,
+			SplitByDirection: false,
 		}
 		if err := runRMode(opts); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -121,9 +140,40 @@ func runGSEA(cmd *flag.FlagSet) {
 	}
 
 	var st *store.SQLiteStore
-	if strings.TrimSpace(c.dbPath) != "" {
+	effectiveDBPath := strings.TrimSpace(c.dbPath)
+	if effectiveDBPath == "" && c.useEmbeddedDB {
+		path, embedErr := ensureEmbeddedDefaultSQLiteDBFile()
+		if embedErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to prepare embedded SQLite DB (%s): %v\n", embeddedDefaultSQLiteSHA256(), embedErr)
+		} else {
+			effectiveDBPath = path
+			fmt.Printf("Using embedded SQLite DB: %s\n", effectiveDBPath)
+		}
+	}
+
+	if c.updateDB {
+		if effectiveDBPath == "" {
+			fmt.Fprintln(os.Stderr, "Error: --update-db requires --db or --use-embedded-db")
+			os.Exit(1)
+		}
+		fmt.Printf("Updating SQLite DB before analysis (db=%s, species=%s)...\n", c.database, c.species)
+		if err := runDownloadUpdateForDB(dbUpdateOptions{
+			Database:    c.database,
+			Species:     c.species,
+			Ontology:    c.ontology,
+			Collection:  c.collection,
+			DBPath:      effectiveDBPath,
+			WithIDMaps:  c.updateDBIDMaps,
+			IDMapsLevel: c.updateDBIDLevel,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "Error updating sqlite db: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	if effectiveDBPath != "" {
 		var err error
-		st, err = store.OpenSQLite(c.dbPath)
+		st, err = store.OpenSQLite(effectiveDBPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error opening sqlite db: %v\n", err)
 			os.Exit(1)
@@ -186,7 +236,12 @@ func runGSEA(cmd *flag.FlagSet) {
 			if st != nil {
 				converter = annotation.NewSQLiteIDConverter(st)
 			} else {
-				converter = annotation.NewKEGGIDConverter(c.dataDir)
+				kc := annotation.NewKEGGIDConverter(c.dataDir)
+				if applyKEGGCacheMax {
+					kc.SetMaxCacheEntries(keggCacheMax)
+				}
+				keggConv = kc
+				converter = kc
 			}
 			converted, mapping, err := annotation.ConvertGeneID(input.Genes, targetIDType, c.species, converter)
 			if err != nil {
@@ -439,6 +494,7 @@ func runGSEA(cmd *flag.FlagSet) {
 		os.Exit(1)
 	}
 
+	writeKEGGIDCacheMetricsIfRequested(keggConv)
 	fmt.Println("Done!")
 }
 

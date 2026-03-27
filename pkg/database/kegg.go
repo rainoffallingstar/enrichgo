@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"enrichgo/pkg/netutil"
 )
 
 // KEGGData KEGG 数据库
@@ -35,7 +37,9 @@ func DownloadKEGG(species, outputDir string) (*KEGGData, error) {
 	// 示例: 获取人类 hsa 通路
 	url := fmt.Sprintf("https://rest.kegg.jp/link/%s/pathway", species)
 
-	resp, err := http.Get(url)
+	client := netutil.DefaultClient()
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch KEGG data: %v", err)
 	}
@@ -105,7 +109,9 @@ func fetchKEGGPathwayInfo(data *KEGGData) error {
 	// 获取通路定义
 	url := fmt.Sprintf("https://rest.kegg.jp/list/pathway/%s", data.Species)
 
-	resp, err := http.Get(url)
+	client := netutil.DefaultClient()
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -159,7 +165,7 @@ func LoadKEGG(species, dataDir string) (*KEGGData, error) {
 	for _, gs := range sets {
 		data.Pathways[gs.ID] = &Pathway{
 			ID:          gs.ID,
-			Name:        gs.Name,
+			Name:        nameFromGMTGeneSet(gs),
 			Genes:       gs.Genes,
 			Description: gs.Description,
 		}
@@ -212,7 +218,9 @@ func saveKEGGData(data *KEGGData, outputDir string) error {
 func GetSupportedKEGGSpecies() (map[string]string, error) {
 	url := "https://rest.kegg.jp/list/organism"
 
-	resp, err := http.Get(url)
+	client := netutil.DefaultClient()
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -239,7 +247,9 @@ func GetSupportedKEGGSpecies() (map[string]string, error) {
 func fetchAndSaveKEGGIDMap(species, outputDir string) error {
 	url := fmt.Sprintf("https://rest.kegg.jp/list/%s", species)
 
-	resp, err := http.Get(url)
+	client := netutil.DefaultClient()
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to fetch KEGG gene list: %v", err)
 	}

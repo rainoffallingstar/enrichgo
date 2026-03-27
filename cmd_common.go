@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"enrichgo/pkg/annotation"
@@ -131,4 +132,47 @@ func loadEntrezSymbolMapFromIDMap(path string) (map[string]string, error) {
 		return nil, err
 	}
 	return m, nil
+}
+
+const envKEGGIDCacheMaxEntries = "ENRICHGO_KEGG_ID_CACHE_MAX_ENTRIES"
+const envKEGGIDCacheMetricsTSV = "ENRICHGO_KEGG_ID_CACHE_METRICS_TSV"
+
+// resolveKEGGIDCacheMaxEntries resolves the max entries for KEGG ID conversion cache.
+// Precedence: flag value (non-zero) > env (non-empty).
+// Return values:
+// - max: the resolved value
+// - ok:  whether a non-default value should be applied
+func resolveKEGGIDCacheMaxEntries(flagVal int) (max int, ok bool, err error) {
+	if flagVal != 0 {
+		return flagVal, true, nil
+	}
+	raw, exists := os.LookupEnv(envKEGGIDCacheMaxEntries)
+	if !exists {
+		return 0, false, nil
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "0" {
+		return 0, false, nil
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, true, fmt.Errorf("%s must be an integer (got %q): %w", envKEGGIDCacheMaxEntries, raw, err)
+	}
+	return v, true, nil
+}
+
+func writeKEGGIDCacheMetricsIfRequested(conv *annotation.KEGGIDConverter) {
+	path := strings.TrimSpace(os.Getenv(envKEGGIDCacheMetricsTSV))
+	if path == "" {
+		return
+	}
+	var st annotation.KEGGIDCacheStats
+	if conv != nil {
+		st = conv.Stats()
+	}
+	content := "hits\tmisses\tevictions\tentries\tbuckets\tmax_entries\n"
+	content += fmt.Sprintf("%d\t%d\t%d\t%d\t%d\t%d\n", st.Hits, st.Misses, st.Evictions, st.Entries, st.Buckets, st.MaxEntries)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to write KEGG ID cache metrics to %s: %v\n", path, err)
+	}
 }

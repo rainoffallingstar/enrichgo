@@ -16,16 +16,27 @@ import (
 )
 
 type rRunOptions struct {
-	Command    string
-	Database   string
-	Species    string
-	Ontology   string
-	Collection string
-	InputFile  string
-	OutputFile string
-	DataDir    string
-	NPerm      int
-	Format     string
+	Command          string
+	Database         string
+	Species          string
+	Ontology         string
+	Collection       string
+	InputFile        string
+	OutputFile       string
+	DataDir          string
+	NPerm            int
+	Format           string
+	SigCol           string
+	SigVal           string
+	FDRCol           string
+	FDRThreshold     float64
+	RankCol          string
+	SplitByDirection bool
+	DirCol           string
+	UpVal            string
+	DownVal          string
+	LogFCCol         string
+	LogFCThreshold   float64
 }
 
 type benchMetrics struct {
@@ -95,8 +106,17 @@ func runRMode(opts *rRunOptions) error {
 	env = append(env, "ALIGN_INCLUDE_REACTOME="+boolEnv(db == "reactome"))
 	env = append(env, "ALIGN_INCLUDE_MSIGDB="+boolEnv(db == "msigdb"))
 	env = append(env, "ALIGN_MSIGDB_COLLECTIONS="+opts.Collection)
-	env = append(env, "ALIGN_FDR_COL=FDR")
-	env = append(env, "ALIGN_RANK_COL=logFC")
+	env = append(env, "ALIGN_SIG_COL="+opts.SigCol)
+	env = append(env, "ALIGN_SIG_VAL="+opts.SigVal)
+	env = append(env, "ALIGN_FDR_COL="+opts.FDRCol)
+	env = append(env, "ALIGN_FDR_THRESHOLD="+strconv.FormatFloat(opts.FDRThreshold, 'g', -1, 64))
+	env = append(env, "ALIGN_RANK_COL="+opts.RankCol)
+	env = append(env, "ALIGN_SPLIT_BY_DIRECTION="+boolEnv(opts.SplitByDirection))
+	env = append(env, "ALIGN_DIR_COL="+opts.DirCol)
+	env = append(env, "ALIGN_UP_VAL="+opts.UpVal)
+	env = append(env, "ALIGN_DOWN_VAL="+opts.DownVal)
+	env = append(env, "ALIGN_LOGFC_COL="+opts.LogFCCol)
+	env = append(env, "ALIGN_LOGFC_THRESHOLD="+strconv.FormatFloat(opts.LogFCThreshold, 'g', -1, 64))
 
 	keggGMT := filepath.Join(opts.DataDir, fmt.Sprintf("%s.gmt", opts.Species))
 	keggIDMap := filepath.Join(opts.DataDir, fmt.Sprintf("kegg_%s_idmap.tsv", opts.Species))
@@ -187,20 +207,32 @@ func runBenchmarkMode(command, database, outputFile, benchmarkOut string) error 
 	goArgs := append(baseArgs, "--benchmark=false", "--use-r=false", "-o", outputFile)
 	rArgs := append(baseArgs, "--benchmark=false", "--use-r=true", "-o", rOutput)
 
+	tmpOut, err := os.MkdirTemp("", "enrichgo-bench-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpOut)
+	goMetricsPath := filepath.Join(tmpOut, "go_kegg_id_cache_metrics.tsv")
+
 	fmt.Printf("Benchmarking Go implementation (%s/%s)...\n", command, database)
-	goMetrics, err := runCommandWithMetrics(exePath, goArgs)
+	goMetrics, err := runCommandWithMetrics(exePath, goArgs, []string{envKEGGIDCacheMetricsTSV + "=" + goMetricsPath})
 	if err != nil {
 		return fmt.Errorf("Go benchmark run failed: %w", err)
 	}
 	fmt.Printf("Benchmarking R implementation (%s/%s)...\n", command, database)
-	rMetrics, err := runCommandWithMetrics(exePath, rArgs)
+	rMetrics, err := runCommandWithMetrics(exePath, rArgs, nil)
 	if err != nil {
 		return fmt.Errorf("R benchmark run failed: %w", err)
 	}
 
-	content := "impl\tcommand\tdb\tseconds\tmax_rss_kb\toutput\n"
-	content += fmt.Sprintf("go\t%s\t%s\t%.6f\t%d\t%s\n", command, database, goMetrics.Seconds, goMetrics.MaxRSSKB, outputFile)
-	content += fmt.Sprintf("r\t%s\t%s\t%.6f\t%d\t%s\n", command, database, rMetrics.Seconds, rMetrics.MaxRSSKB, rOutput)
+	cacheSt, _ := readKEGGIDCacheMetricsTSV(goMetricsPath)
+	content := "impl\tcommand\tdb\tseconds\tmax_rss_kb\tkegg_id_cache_hits\tkegg_id_cache_misses\tkegg_id_cache_evictions\tkegg_id_cache_entries\tkegg_id_cache_buckets\tkegg_id_cache_max_entries\toutput\n"
+	content += fmt.Sprintf("go\t%s\t%s\t%.6f\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%s\n",
+		command, database, goMetrics.Seconds, goMetrics.MaxRSSKB,
+		cacheSt.Hits, cacheSt.Misses, cacheSt.Evictions, cacheSt.Entries, cacheSt.Buckets, cacheSt.MaxEntries,
+		outputFile,
+	)
+	content += fmt.Sprintf("r\t%s\t%s\t%.6f\t%d\t0\t0\t0\t0\t0\t0\t%s\n", command, database, rMetrics.Seconds, rMetrics.MaxRSSKB, rOutput)
 	if err := os.WriteFile(benchmarkOut, []byte(content), 0644); err != nil {
 		return err
 	}
@@ -208,9 +240,12 @@ func runBenchmarkMode(command, database, outputFile, benchmarkOut string) error 
 	return nil
 }
 
-func runCommandWithMetrics(binary string, args []string) (*benchMetrics, error) {
+func runCommandWithMetrics(binary string, args []string, extraEnv []string) (*benchMetrics, error) {
 	start := time.Now()
 	cmd := exec.Command(binary, args...)
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -224,6 +259,73 @@ func runCommandWithMetrics(binary string, args []string) (*benchMetrics, error) 
 		metrics.MaxRSSKB = maxKB
 	}
 	return metrics, nil
+}
+
+type keggIDCacheMetrics struct {
+	Hits       uint64
+	Misses     uint64
+	Evictions  uint64
+	Entries    uint64
+	Buckets    uint64
+	MaxEntries int64
+}
+
+func readKEGGIDCacheMetricsTSV(path string) (keggIDCacheMetrics, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return keggIDCacheMetrics{}, err
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	if len(lines) < 2 {
+		return keggIDCacheMetrics{}, fmt.Errorf("invalid metrics tsv (expected header+row)")
+	}
+	parts := strings.Split(lines[1], "\t")
+	if len(parts) < 6 {
+		return keggIDCacheMetrics{}, fmt.Errorf("invalid metrics tsv row (expected 6 cols)")
+	}
+	parse := func(s string) (uint64, error) {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return 0, nil
+		}
+		return strconv.ParseUint(s, 10, 64)
+	}
+	h, err := parse(parts[0])
+	if err != nil {
+		return keggIDCacheMetrics{}, err
+	}
+	m, err := parse(parts[1])
+	if err != nil {
+		return keggIDCacheMetrics{}, err
+	}
+	e, err := parse(parts[2])
+	if err != nil {
+		return keggIDCacheMetrics{}, err
+	}
+	en, err := parse(parts[3])
+	if err != nil {
+		return keggIDCacheMetrics{}, err
+	}
+	bk, err := parse(parts[4])
+	if err != nil {
+		return keggIDCacheMetrics{}, err
+	}
+	mxRaw := strings.TrimSpace(parts[5])
+	var mx int64
+	if mxRaw != "" {
+		mx, err = strconv.ParseInt(mxRaw, 10, 64)
+		if err != nil {
+			return keggIDCacheMetrics{}, err
+		}
+	}
+	return keggIDCacheMetrics{
+		Hits:       h,
+		Misses:     m,
+		Evictions:  e,
+		Entries:    en,
+		Buckets:    bk,
+		MaxEntries: mx,
+	}, nil
 }
 
 func maxRSSKBFromSysUsage(u any) (int, bool) {

@@ -9,14 +9,16 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"enrichgo/pkg/netutil"
 )
 
 type HTTPClient interface {
 	Do(req *http.Request) (*http.Response, error)
 }
 
-func defaultHTTPClient() *http.Client {
-	return &http.Client{Timeout: 5 * time.Minute}
+func defaultHTTPClient() HTTPClient {
+	return netutil.NewClient(netutil.Options{Timeout: 5 * time.Minute})
 }
 
 func openGzipURL(url string, client HTTPClient) (io.ReadCloser, *gzip.Reader, error) {

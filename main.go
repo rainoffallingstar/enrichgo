@@ -37,6 +37,7 @@ func main() {
 	enrichCmd := flag.NewFlagSet("enrich", flag.ExitOnError)
 	gseaCmd := flag.NewFlagSet("gsea", flag.ExitOnError)
 	downloadCmd := flag.NewFlagSet("download", flag.ExitOnError)
+	dbAuditCmd := flag.NewFlagSet("db-audit", flag.ExitOnError)
 
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: enrichgo <command> [options]")
@@ -44,6 +45,7 @@ func main() {
 		fmt.Println("  enrich   Over-representation analysis (ORA)")
 		fmt.Println("  gsea     Gene Set Enrichment Analysis (GSEA)")
 		fmt.Println("  download Download database files")
+		fmt.Println("  db-audit Audit SQLite backend schema and persistence")
 		os.Exit(1)
 	}
 
@@ -54,6 +56,8 @@ func main() {
 		runGSEA(gseaCmd)
 	case "download":
 		runDownload(downloadCmd)
+	case "db-audit":
+		runDBAudit(dbAuditCmd)
 	case "help", "--help", "-h":
 		printUsage()
 	default:
@@ -70,11 +74,13 @@ func printUsage() {
 	fmt.Println("  enrich   Over-representation analysis (ORA)")
 	fmt.Println("  gsea     Gene Set Enrichment Analysis (GSEA)")
 	fmt.Println("  download Download database files")
+	fmt.Println("  db-audit Audit SQLite backend schema and persistence")
 	fmt.Println()
 	fmt.Println("Examples:")
 	fmt.Println("  enrichgo enrich -i genes.txt -d kegg -s hsa -o result.tsv")
 	fmt.Println("  enrichgo gsea -i ranked_genes.txt -d go -s hsa -o gsea_result.tsv")
 	fmt.Println("  enrichgo download -d kegg -s hsa -o data/")
+	fmt.Println("  enrichgo db-audit --db data/enrichgo.db")
 	fmt.Println()
 	fmt.Println("For more information, use: enrichgo <command> -h")
 }

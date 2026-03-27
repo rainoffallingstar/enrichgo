@@ -10,6 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"enrichgo/pkg/netutil"
 )
 
 // ReactomeData Reactome 数据库
@@ -45,12 +48,15 @@ var reactomeSpeciesPrefixMap = map[string]string{
 	"gga": "R-GGA",
 }
 
+var reactomeHTTPClient = netutil.NewClient(netutil.Options{Timeout: 5 * time.Minute})
+
 // DownloadReactome 下载 Reactome 通路数据
 func DownloadReactome(species, outputDir string) (*ReactomeData, error) {
 	// 下载 Reactome GMT zip 文件 (包含所有物种)
 	url := "https://reactome.org/download/current/ReactomePathways.gmt.zip"
 
-	resp, err := http.Get(url)
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	resp, err := reactomeHTTPClient.Do(req)
 	if err != nil {
 		return &ReactomeData{
 			Pathways: make(map[string]*Pathway),
@@ -195,7 +201,7 @@ func LoadReactome(species, dataDir string) (*ReactomeData, error) {
 	for _, gs := range sets {
 		data.Pathways[gs.ID] = &Pathway{
 			ID:          gs.ID,
-			Name:        gs.Name,
+			Name:        nameFromGMTGeneSet(gs),
 			Genes:       gs.Genes,
 			Description: gs.Description,
 		}

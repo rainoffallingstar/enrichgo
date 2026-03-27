@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
+	"enrichgo/pkg/netutil"
 	"enrichgo/pkg/types"
 )
 
@@ -37,6 +39,7 @@ const (
 )
 
 var msigdbReleaseFallbacks = []string{"2024.1.Hs", "2023.2.Hs", "7.5.1"}
+var msigdbHTTPClient = netutil.NewClient(netutil.Options{Timeout: 2 * time.Minute})
 
 func msigdbURLCandidates(collection MSigDBCollection) []string {
 	collectionName := string(collection)
@@ -57,7 +60,8 @@ func DownloadMSigDB(collection MSigDBCollection, outputDir string) (GeneSets, er
 	var lastErr error
 	var usedURL string
 	for _, url := range msigdbURLCandidates(collection) {
-		resp, err := http.Get(url)
+		req, _ := http.NewRequest(http.MethodGet, url, nil)
+		resp, err := msigdbHTTPClient.Do(req)
 		if err != nil {
 			lastErr = fmt.Errorf("fetch failed for %s: %v", url, err)
 			continue

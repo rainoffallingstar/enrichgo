@@ -118,3 +118,39 @@ func (s *SQLiteStore) LookupIDMap(ctx context.Context, species, fromType, toType
 	return out, nil
 }
 
+// ScanIDMap loads all mappings for a species/fromType/toType pair.
+func (s *SQLiteStore) ScanIDMap(ctx context.Context, species, fromType, toType string) (map[string][]string, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("store not initialized")
+	}
+	species = strings.ToLower(strings.TrimSpace(species))
+	fromType = strings.TrimSpace(fromType)
+	toType = strings.TrimSpace(toType)
+	if species == "" || fromType == "" || toType == "" {
+		return nil, fmt.Errorf("invalid idmap scan args")
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT from_id, to_id
+		FROM idmap
+		WHERE species=? AND from_type=? AND to_type=?
+		ORDER BY from_id, to_id
+	`, species, fromType, toType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string][]string)
+	for rows.Next() {
+		var fromID, toID string
+		if err := rows.Scan(&fromID, &toID); err != nil {
+			return nil, err
+		}
+		out[fromID] = append(out[fromID], toID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"enrichgo/pkg/netutil"
 )
 
 // ID 类型
@@ -101,10 +103,24 @@ type speciesGeneMap struct {
 
 // KEGGIDConverter 基于 KEGG list 接口 + 本地缓存的 ID 转换器
 type KEGGIDConverter struct {
-	cache       map[string]map[string][]string
+	cache       map[string]*lruCache
 	speciesMaps map[string]*speciesGeneMap
 	dataDir     string
+	maxEntries  int
+	hits        uint64
+	misses      uint64
 	mu          sync.RWMutex
+}
+
+const defaultKEGGIDCacheMaxEntries = 50000
+
+type KEGGIDCacheStats struct {
+	Hits       uint64
+	Misses     uint64
+	Evictions  uint64
+	Entries    int
+	Buckets    int
+	MaxEntries int
 }
 
 // NewKEGGIDConverter 创建 KEGG ID 转换器。
@@ -115,9 +131,10 @@ func NewKEGGIDConverter(dataDir ...string) *KEGGIDConverter {
 		dir = dataDir[0]
 	}
 	return &KEGGIDConverter{
-		cache:       make(map[string]map[string][]string),
+		cache:       make(map[string]*lruCache),
 		speciesMaps: make(map[string]*speciesGeneMap),
 		dataDir:     dir,
+		maxEntries:  defaultKEGGIDCacheMaxEntries,
 	}
 }
 
@@ -126,23 +143,76 @@ func (c *KEGGIDConverter) getCacheKey(species string, fromType, toType IDType) s
 	return fmt.Sprintf("%s:%s:%s", species, fromType, toType)
 }
 
+// SetMaxCacheEntries sets the per-(species,from,to) in-memory cache cap.
+// max<=0 disables eviction (unbounded).
+func (c *KEGGIDConverter) SetMaxCacheEntries(max int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.maxEntries = max
+	for _, cc := range c.cache {
+		if cc == nil {
+			continue
+		}
+		cc.max = max
+		cc.evictIfNeeded()
+	}
+}
+
+func (c *KEGGIDConverter) Stats() KEGGIDCacheStats {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	st := KEGGIDCacheStats{
+		Hits:       c.hits,
+		Misses:     c.misses,
+		MaxEntries: c.maxEntries,
+	}
+	for _, cc := range c.cache {
+		if cc == nil {
+			continue
+		}
+		st.Buckets++
+		st.Entries += cc.Len()
+		st.Evictions += cc.Evicted()
+	}
+	return st
+}
+
+func (c *KEGGIDConverter) getOrCreateCacheLocked(key string) *lruCache {
+	if c.cache == nil {
+		c.cache = make(map[string]*lruCache)
+	}
+	cc := c.cache[key]
+	if cc == nil {
+		cc = newLRUCache(c.maxEntries)
+		c.cache[key] = cc
+	}
+	return cc
+}
+
 // getCached 获取缓存（兼容旧测试）
 func (c *KEGGIDConverter) getCached(key string, geneID string) (string, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if mapping, ok := c.cache[key]; ok {
-		if ids, ok := mapping[geneID]; ok && len(ids) > 0 {
-			return ids[0], true
-		}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cc := c.cache[key]
+	if cc == nil {
+		return "", false
 	}
-	return "", false
+	ids, ok := cc.Get(geneID)
+	if !ok || len(ids) == 0 {
+		return "", false
+	}
+	return ids[0], true
 }
 
 // setCache 设置缓存
 func (c *KEGGIDConverter) setCache(key string, mapping map[string][]string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.cache[key] = mapping
+	cc := c.getOrCreateCacheLocked(key)
+	for k, v := range mapping {
+		cc.Set(k, v)
+	}
 }
 
 // Convert 转换 ID。优先本地映射，再尝试在线刷新映射。
@@ -152,16 +222,32 @@ func (c *KEGGIDConverter) Convert(geneIDs []string, fromType, toType IDType, spe
 	}
 
 	cacheKey := c.getCacheKey(species, fromType, toType)
-	if cached, ok := c.getFullCachedResult(cacheKey, geneIDs); ok {
-		return cached, nil
+	result := make(map[string][]string, len(geneIDs))
+	missing := make([]string, 0)
+	c.mu.Lock()
+	cc := c.getOrCreateCacheLocked(cacheKey)
+	for _, id := range geneIDs {
+		if ids, ok := cc.Get(id); ok {
+			result[id] = ids
+			c.hits++
+			continue
+		}
+		c.misses++
+		missing = append(missing, id)
+	}
+	c.mu.Unlock()
+	if len(missing) == 0 {
+		return result, nil
 	}
 
 	if fromType == toType {
-		result := make(map[string][]string, len(geneIDs))
-		for _, id := range geneIDs {
-			result[id] = []string{id}
+		newMap := make(map[string][]string, len(missing))
+		for _, id := range missing {
+			v := []string{id}
+			result[id] = v
+			newMap[id] = v
 		}
-		c.setCache(cacheKey, result)
+		c.setCache(cacheKey, newMap)
 		return result, nil
 	}
 
@@ -171,45 +257,31 @@ func (c *KEGGIDConverter) Convert(geneIDs []string, fromType, toType IDType, spe
 			return nil, err
 		}
 
-		result := make(map[string][]string, len(geneIDs))
-		for _, id := range geneIDs {
+		newMap := make(map[string][]string, len(missing))
+		for _, id := range missing {
+			var v []string
 			if converted, ok := convertWithSpeciesMap(id, fromType, toType, species, spMap); ok {
-				result[id] = converted
+				v = converted
 			} else {
-				result[id] = []string{id}
+				v = []string{id}
 			}
+			result[id] = v
+			newMap[id] = v
 		}
-		c.setCache(cacheKey, result)
+		c.setCache(cacheKey, newMap)
 		return result, nil
 	}
 
 	// 对于 KEGG list 无法覆盖的类型，保留旧的 conv 端点兜底。
-	result, err := c.convertByKEGGConvAPI(geneIDs, fromType, toType, species)
+	convMap, err := c.convertByKEGGConvAPI(missing, fromType, toType, species)
 	if err != nil {
 		return nil, err
 	}
-	c.setCache(cacheKey, result)
+	for k, v := range convMap {
+		result[k] = v
+	}
+	c.setCache(cacheKey, convMap)
 	return result, nil
-}
-
-func (c *KEGGIDConverter) getFullCachedResult(cacheKey string, geneIDs []string) (map[string][]string, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	mapping, ok := c.cache[cacheKey]
-	if !ok {
-		return nil, false
-	}
-
-	result := make(map[string][]string, len(geneIDs))
-	for _, id := range geneIDs {
-		ids, found := mapping[id]
-		if !found {
-			return nil, false
-		}
-		result[id] = ids
-	}
-	return result, true
 }
 
 func supportsSpeciesMapConversion(fromType, toType IDType) bool {
@@ -397,8 +469,9 @@ func (c *KEGGIDConverter) saveSpeciesGeneMapToFile(species string, m *speciesGen
 
 func (c *KEGGIDConverter) fetchSpeciesGeneMapFromKEGG(species string) (*speciesGeneMap, error) {
 	url := fmt.Sprintf("https://rest.kegg.jp/list/%s", species)
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Get(url)
+	client := netutil.NewClient(netutil.Options{Timeout: 30 * time.Second})
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -475,7 +548,9 @@ func (c *KEGGIDConverter) convertByKEGGConvAPI(geneIDs []string, fromType, toTyp
 	}
 
 	body := strings.NewReader(strings.Join(cleanIDs, "\n"))
-	resp, err := http.Post(url, "text/plain", body)
+	req, _ := http.NewRequest(http.MethodPost, url, body)
+	req.Header.Set("Content-Type", "text/plain")
+	resp, err := netutil.DefaultClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to call KEGG API: %v", err)
 	}

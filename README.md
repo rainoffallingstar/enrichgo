@@ -59,12 +59,32 @@ go build -o enrichgo .
   -o /tmp/gsea_kegg.tsv
 ```
 
-使用 SQLite 离线包运行时加 `--db`：
+默认发布二进制内置一个 SQLite 默认库（CI 构建 profile: `species=hsa`, `idmaps_level=basic`）。
+不传 `--db` 时会自动使用内置库落盘副本（可用 `ENRICHGO_DEFAULT_DB_PATH` 指定默认落盘路径）。
+
+```bash
+# 直接使用内置 SQLite（无需 --db）
+./enrichgo enrich -i test-data/DE_results.csv -d kegg -s hsa -o /tmp/ora_kegg.tsv
+./enrichgo gsea   -i test-data/DE_results.csv -d go   -s hsa -o /tmp/gsea_go.tsv
+```
+
+如果要显式指定 DB 文件，继续使用 `--db`：
 
 ```bash
 ./enrichgo enrich -i test-data/DE_results.csv -d kegg -s hsa --db data/enrichgo.db -o /tmp/ora_kegg.tsv
 ./enrichgo gsea   -i test-data/DE_results.csv -d go   -s hsa --db data/enrichgo.db -o /tmp/gsea_go.tsv
 ```
+
+如需在分析前刷新 SQLite 数据，可开启更新：
+
+```bash
+./enrichgo enrich -i test-data/DE_results.csv -d kegg -s hsa --update-db -o /tmp/ora_kegg.tsv
+./enrichgo gsea -i test-data/DE_results.csv -d go -s hsa --update-db --update-db-idmaps --update-db-idmaps-level basic -o /tmp/gsea_go.tsv
+```
+
+说明：
+- `--update-db` 不支持 `-d custom`
+- `--update-db` 成功后，该 DB 会标记为用户管理，后续不会被内置默认库自动覆盖
 
 ## Go / R 运行模式
 
@@ -115,6 +135,10 @@ benchmark 输出示例列：
   - `-o` 输出文件
   - `-d` 数据库（`kegg/go/reactome/msigdb/custom`）
   - `--data-dir` 缓存目录（默认 `data`）
+  - `--db` 指定 SQLite 离线包
+  - `--use-embedded-db` 未提供 `--db` 时是否使用内置默认 SQLite（默认 `true`）
+  - `--update-db` 分析前先更新目标 SQLite
+  - `--update-db-idmaps` / `--update-db-idmaps-level` 控制更新时 ID 映射刷新
 - GSEA：
   - `-rank-col` 排名列（默认 `logFC`）
   - `-nPerm` 置换次数（默认 `1000`）

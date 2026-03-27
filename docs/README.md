@@ -46,6 +46,7 @@
 
 - `download -d kegg` 会同时缓存通路文件和 `kegg_<species>_idmap.tsv`（ID 映射）。
 - 之后可通过 `--data-dir` 在离线环境复用缓存，避免运行时依赖网络 ID 转换。
+- 默认发布二进制内置 SQLite 默认库（固定 profile：`species=hsa`，`idmaps_level=basic`），不传 `--db` 会自动使用。
 - 也可用 `--db` 将通路库与 ID 映射打包到单个 SQLite 文件，运行时通过 `--db` 直接读取（更便于分发与复用）。
 
 ```bash
@@ -55,7 +56,13 @@
 # 离线运行（使用本地缓存）
 ./enrichgo enrich -i test-data/DE_results.csv -d kegg -s hsa --data-dir data --fdr-col FDR --fdr-threshold 0.05
 
+# 直接使用内置 SQLite（无需 --db）
+./enrichgo enrich -i test-data/DE_results.csv -d kegg -s hsa -o /tmp/ora_kegg.tsv
+
 # 打包并离线运行（SQLite 单文件）
 ./enrichgo download -d all -s hsa -ont ALL -c all --db data/enrichgo.db --db-only --idmaps --idmaps-level extended
 ./enrichgo enrich -i test-data/DE_results.csv -d kegg -s hsa --db data/enrichgo.db --fdr-col FDR --fdr-threshold 0.05
+
+# 分析前刷新 SQLite（不适用于 -d custom）
+./enrichgo gsea -i test-data/DE_results.csv -d go -s hsa --update-db --update-db-idmaps --update-db-idmaps-level basic -o /tmp/gsea_go.tsv
 ```

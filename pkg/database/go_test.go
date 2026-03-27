@@ -1,6 +1,8 @@
 package database
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -20,5 +22,26 @@ func TestParseGAFUsesGeneSymbol(t *testing.T) {
 	terms := data.Gene2Terms["TP53"]
 	if len(terms) != 1 || terms[0] != "GO:0003677" {
 		t.Fatalf("expected TP53->GO:0003677 mapping, got %+v", terms)
+	}
+}
+
+func TestLoadGOUsesGMTNameAsTermName(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "go_hsa_BP.gmt")
+	content := "GO:0000001\tMitochondrion inheritance\tGENE1\tGENE2\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write gmt: %v", err)
+	}
+
+	data, err := LoadGO(path)
+	if err != nil {
+		t.Fatalf("LoadGO failed: %v", err)
+	}
+	term := data.Terms["GO:0000001"]
+	if term == nil {
+		t.Fatalf("expected GO:0000001 term")
+	}
+	if term.Name != "Mitochondrion inheritance" {
+		t.Fatalf("term name=%q want %q", term.Name, "Mitochondrion inheritance")
 	}
 }

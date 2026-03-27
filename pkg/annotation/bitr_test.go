@@ -319,6 +319,66 @@ func TestLoadSpeciesMapWithMultiColumnIDMap(t *testing.T) {
 	}
 }
 
+func TestKEGGIDConverterPartialCacheFill(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "kegg_hsa_idmap.tsv")
+	content := "7157\tTP53\n1956\tEGFR\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write mapping file: %v", err)
+	}
+
+	converter := NewKEGGIDConverter(dir)
+	converter.SetMaxCacheEntries(100)
+
+	key := converter.getCacheKey("hsa", IDSymbol, IDEntrez)
+
+	if _, err := converter.Convert([]string{"TP53"}, IDSymbol, IDEntrez, "hsa"); err != nil {
+		t.Fatalf("first Convert: %v", err)
+	}
+	if _, ok := converter.getCached(key, "TP53"); !ok {
+		t.Fatalf("expected TP53 cached after first Convert")
+	}
+
+	if got, err := converter.Convert([]string{"TP53", "EGFR"}, IDSymbol, IDEntrez, "hsa"); err != nil {
+		t.Fatalf("second Convert: %v", err)
+	} else {
+		if got["TP53"][0] != "7157" || got["EGFR"][0] != "1956" {
+			t.Fatalf("unexpected mapping: %+v", got)
+		}
+	}
+	if _, ok := converter.getCached(key, "EGFR"); !ok {
+		t.Fatalf("expected EGFR cached after second Convert")
+	}
+}
+
+func TestKEGGIDConverterCacheIsBounded(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "kegg_hsa_idmap.tsv")
+	content := "7157\tTP53\n1956\tEGFR\n1\tA1BG\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write mapping file: %v", err)
+	}
+
+	converter := NewKEGGIDConverter(dir)
+	converter.SetMaxCacheEntries(2)
+
+	_, err := converter.Convert([]string{"TP53", "EGFR", "A1BG"}, IDSymbol, IDEntrez, "hsa")
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+
+	key := converter.getCacheKey("hsa", IDSymbol, IDEntrez)
+	converter.mu.RLock()
+	cc := converter.cache[key]
+	converter.mu.RUnlock()
+	if cc == nil {
+		t.Fatalf("expected cache bucket for %s", key)
+	}
+	if cc.Len() > 2 {
+		t.Fatalf("cache len=%d, want <=2", cc.Len())
+	}
+}
+
 type mockConverter struct {
 	mapping map[string][]string
 	err     error

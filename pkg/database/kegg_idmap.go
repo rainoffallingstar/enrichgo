@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"enrichgo/pkg/netutil"
 )
 
 // KEGGSpeciesIDMap holds a best-effort offline mapping derived from KEGG's gene list endpoint.
@@ -24,8 +26,9 @@ func FetchKEGGSpeciesIDMap(species string) (*KEGGSpeciesIDMap, error) {
 	}
 
 	url := fmt.Sprintf("https://rest.kegg.jp/list/%s", species)
-	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Get(url)
+	client := netutil.NewClient(netutil.Options{Timeout: 60 * time.Second})
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -110,8 +113,9 @@ func FetchKEGGLinks(species, target string) ([]KEGGLinkPair, error) {
 	}
 
 	url := fmt.Sprintf("https://rest.kegg.jp/link/%s/%s", target, species)
-	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Get(url)
+	client := netutil.NewClient(netutil.Options{Timeout: 60 * time.Second})
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -156,4 +160,3 @@ func FetchKEGGLinks(species, target string) ([]KEGGLinkPair, error) {
 	}
 	return pairs, nil
 }
-

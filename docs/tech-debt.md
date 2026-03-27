@@ -2,51 +2,28 @@
 
 ## 待解决问题
 
-### 1. ID 转换缓存优化 (优先级: 中)
-**问题**: 当前缓存使用简单 map，未区分不同物种/ID类型组合
+### 1. ID 转换缓存：持久化/可配置化 (优先级: 中)
+**现状（已缓解）**:
+- `KEGGIDConverter` 已使用按 `species:fromType:toType` 分桶的 LRU 缓存，并支持“部分命中 + 仅补齐缺失项”，避免重复请求/重复计算。
+- 默认每个桶 `maxEntries=50000`（可通过 CLI `--kegg-id-cache-max-entries` 或环境变量 `ENRICHGO_KEGG_ID_CACHE_MAX_ENTRIES` 调整）。
 
-**现状**:
-- `KEGGIDConverter.cache` 存储所有转换结果
-- 缓存 key: `species:fromType:toType`
-- 存在缓存未命中时的重复请求问题
-
-**优化方向**:
-- 考虑使用 `sync.Map` 提高并发性能
-- 添加缓存大小限制 (LRU 淘汰)
-- 持久化缓存到本地文件
+**仍待解决**:
+- 在对齐流程里记录命中率（当前可通过 `ENRICHGO_KEGG_ID_CACHE_METRICS_TSV` 导出缓存命中/未命中/淘汰统计；benchmark TSV 也已包含该指标）。
+- 评估是否需要把 conv API 的结果落盘（与现有 `kegg_<species>_idmap.tsv` 的物种映射区分开）。
 
 ---
 
-### 2. GO 数据库本地加载 (优先级: 低)
-**问题**: 每次运行都重新下载 GO 数据
+### 2. 错误处理完善 (优先级: 低)
+**现状（已缓解）**:
+- 已统一下载/拉取路径的 HTTP 超时与重试策略，减少偶发网络失败导致的“硬失败”。
 
-**现状**: `DownloadGO` 只下载不检查本地缓存
-
-**修复方案**:
-```go
-func LoadOrDownloadGO(species, ontology, dataDir string) (*GOData, error) {
-    // 先检查本地文件
-    localFile := filepath.Join(dataDir, fmt.Sprintf("go_%s_%s.obo", species, ontology))
-    if _, err := os.Stat(localFile); err == nil {
-        return LoadGO(localFile)
-    }
-    return DownloadGO(species, ontology, dataDir)
-}
-```
+**仍待解决**:
+- 为关键下载添加更明确的错误上下文（URL/尝试次数/最终状态码）。
+- 对部分大文件下载（NCBI/UniProt）补充断点续传或更细粒度的失败恢复（如需要）。
 
 ---
 
-### 3. 错误处理完善 (优先级: 低)
-**问题**: 部分错误未优雅处理
-
-**需要改进**:
-- 网络请求超时设置
-- 重试机制
-- 更好的错误提示
-
----
-
-### 4. 并发优化 (优先级: 低)
+### 3. 并发优化 (优先级: 低)
 **问题**: GSEA 置换计算为串行执行
 
 **优化方向**:
@@ -65,7 +42,7 @@ wg.Wait()
 
 ---
 
-### 5. 内存使用优化 (优先级: 低)
+### 4. 内存使用优化 (优先级: 低)
 **问题**: 大基因集可能导致内存占用高
 
 **优化方向**:
@@ -76,6 +53,12 @@ wg.Wait()
 ---
 
 ## 已修复问题
+
+### ✅ 网络请求超时/重试（统一）
+- **修复**: 引入统一 HTTP client（timeout + retry/backoff），并替换数据库下载与 KEGG 在线映射请求路径的直连 `http.Get/http.Post`。
+
+### ✅ GO 数据库本地加载
+- **修复**: 已实现 `LoadOrDownloadGO`，优先读取 `go_<species>_<ontology>.gmt`，缺失时再下载生成。
 
 ### ✅ Reactome 命令集成
 - **问题**: `cmd_enrich.go` 和 `cmd_gsea.go` 中 Reactome case 返回 "not yet implemented"
