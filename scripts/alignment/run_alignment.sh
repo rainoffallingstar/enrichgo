@@ -21,7 +21,12 @@ ALIGN_INCLUDE_REACTOME="${ALIGN_INCLUDE_REACTOME:-0}"
 ALIGN_INCLUDE_MSIGDB="${ALIGN_INCLUDE_MSIGDB:-0}"
 ALIGN_MSIGDB_COLLECTIONS="${ALIGN_MSIGDB_COLLECTIONS:-c1-c8}"
 ALIGN_REBUILD_BIN="${ALIGN_REBUILD_BIN:-1}"
-ALIGN_USE_EMBEDDED_DB="${ALIGN_USE_EMBEDDED_DB:-0}"
+ALIGN_USE_EMBEDDED_DB="${ALIGN_USE_EMBEDDED_DB:-1}"
+ALIGN_EMBEDDED_DB_PREPARE="${ALIGN_EMBEDDED_DB_PREPARE:-1}"
+ALIGN_FORCE_EMBEDDED_DB_REFRESH="${ALIGN_FORCE_EMBEDDED_DB_REFRESH:-0}"
+ALIGN_EMBEDDED_DB_PATH="${ALIGN_EMBEDDED_DB_PATH:-$HOME/.cache/enrichgo/default_enrichgo.db}"
+ALIGN_EMBEDDED_DB_IDMAPS_LEVEL="${ALIGN_EMBEDDED_DB_IDMAPS_LEVEL:-basic}"
+ALIGN_EMBEDDED_DB_MARKER="${ALIGN_EMBEDDED_DB_MARKER:-${ALIGN_EMBEDDED_DB_PATH}.alignment.idmaps_level}"
 ALIGN_ANALYSIS_FLAGS=()
 if [[ "$ALIGN_USE_EMBEDDED_DB" != "1" ]]; then
   ALIGN_ANALYSIS_FLAGS+=(--use-embedded-db=false)
@@ -48,6 +53,24 @@ fi
 
 # Ensure baseline databases are present in data dir.
 # KEGG download also caches ID mapping file for offline SYMBOL->ENTREZ conversion.
+
+
+if [[ "$ALIGN_USE_EMBEDDED_DB" == "1" && "$ALIGN_EMBEDDED_DB_PREPARE" == "1" ]]; then
+  mkdir -p "$(dirname "$ALIGN_EMBEDDED_DB_PATH")"
+  marker_level=""
+  if [[ -f "$ALIGN_EMBEDDED_DB_MARKER" ]]; then
+    marker_level="$(tr -d '[:space:]' < "$ALIGN_EMBEDDED_DB_MARKER")"
+  fi
+  if [[ "$ALIGN_FORCE_EMBEDDED_DB_REFRESH" == "1" || ! -s "$ALIGN_EMBEDDED_DB_PATH" || "$marker_level" != "$ALIGN_EMBEDDED_DB_IDMAPS_LEVEL" ]]; then
+    echo "Preparing embedded runtime DB at $ALIGN_EMBEDDED_DB_PATH (idmaps_level=$ALIGN_EMBEDDED_DB_IDMAPS_LEVEL) ..."
+    ./enrichgo download -d kegg -s hsa \
+      --db "$ALIGN_EMBEDDED_DB_PATH" --db-only \
+      --idmaps --idmaps-level "$ALIGN_EMBEDDED_DB_IDMAPS_LEVEL"
+    printf "%s\n" "$ALIGN_EMBEDDED_DB_IDMAPS_LEVEL" > "$ALIGN_EMBEDDED_DB_MARKER"
+  else
+    echo "Embedded runtime DB already present: $ALIGN_EMBEDDED_DB_PATH (idmaps_level=$marker_level)"
+  fi
+fi
 if [[ "$ALIGN_SKIP_DOWNLOAD" != "1" ]]; then
   if [[ ! -f "$DATA_DIR/hsa.gmt" ]]; then
     echo "Downloading KEGG cache into $DATA_DIR..."
