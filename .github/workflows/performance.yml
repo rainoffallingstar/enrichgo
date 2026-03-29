@@ -42,6 +42,34 @@ jobs:
         run: |
           Rscript -e 'pkgs <- c("clusterProfiler","org.Hs.eg.db","BiocParallel","jsonlite"); missing <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly=TRUE)]; if (length(missing) > 0) stop(paste("missing R packages:", paste(missing, collapse=",")))'
 
+      - name: Prepare embedded SQLite DB for benchmark binary
+        shell: bash
+        env:
+          EMBED_SPECIES: hsa
+          EMBED_IDMAPS_LEVEL: basic
+        run: |
+          set -euo pipefail
+          mkdir -p assets
+
+          CGO_ENABLED=0 go build -o /tmp/enrichgo-bootstrap .
+          /tmp/enrichgo-bootstrap download \
+            -d kegg -s "${EMBED_SPECIES}" \
+            --db "assets/default_enrichgo.db" --db-only \
+            --idmaps --idmaps-level "${EMBED_IDMAPS_LEVEL}"
+
+          audit_output="$(/tmp/enrichgo-bootstrap db-audit --db "assets/default_enrichgo.db")"
+          echo "$audit_output"
+
+          extract_value() {
+            local key="$1"
+            echo "$audit_output" | awk -F= -v k="$key" '$1==k {print $2}' | tail -n1
+          }
+
+          [[ "$(extract_value status)" == "ok" ]]
+          [[ "$(extract_value rows.geneset)" -gt 0 ]]
+          [[ "$(extract_value rows.geneset_gene)" -gt 0 ]]
+          [[ "$(extract_value rows.idmap)" -gt 0 ]]
+
       - name: Build
         run: go build -o enrichgo .
 
@@ -66,6 +94,7 @@ jobs:
             -i /tmp/benchmark_input_kegg.csv \
             -d kegg -s hsa \
             --fdr-col FDR --fdr-threshold 0.05 --split-by-direction=false \
+            --use-embedded-db=true \
             -o /tmp/benchmark_ora_kegg_go.tsv \
             --benchmark \
             --benchmark-out /tmp/benchmark_ora_report.tsv
@@ -77,6 +106,7 @@ jobs:
             -i /tmp/benchmark_input_kegg.csv \
             -d kegg -s hsa \
             -rank-col logFC -nPerm 50 \
+            --use-embedded-db=true \
             -o /tmp/benchmark_gsea_kegg_go.tsv \
             --benchmark \
             --benchmark-out /tmp/benchmark_gsea_report.tsv
