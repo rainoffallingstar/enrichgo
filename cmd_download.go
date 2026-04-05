@@ -2,30 +2,40 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
 
 	"enrichgo/pkg/annotation"
 	"enrichgo/pkg/database"
+	"enrichgo/pkg/netutil"
 	"enrichgo/pkg/store"
 	"enrichgo/pkg/types"
 )
 
 // downloadCmd 数据库下载命令
 type downloadCmd struct {
-	database    string
-	species     string
-	ontology    string
-	collection  string
-	outputDir   string
-	all         bool
-	dbPath      string
-	dbOnly      bool
-	withIDMaps  bool
-	idMapsLevel string
+	database             string
+	species              string
+	ontology             string
+	collection           string
+	outputDir            string
+	all                  bool
+	dbPath               string
+	dbOnly               bool
+	withIDMaps           bool
+	idMapsLevel          string
+	idMapsRetries        int
+	idMapsRetryBackoff   time.Duration
+	idMapsTimeout        time.Duration
+	idMapsHTTPTimeout    time.Duration
+	reactomeAutoRetry    bool
+	reactomeRetries      int
+	reactomeRetryBackoff time.Duration
 }
 
 func runDownload(cmd *flag.FlagSet) {
@@ -41,8 +51,40 @@ func runDownload(cmd *flag.FlagSet) {
 	cmd.BoolVar(&c.dbOnly, "db-only", false, "When used with --db, skip writing GMT/TSV cache files and only write into the SQLite DB")
 	cmd.BoolVar(&c.withIDMaps, "idmaps", true, "When used with --db, also fetch and store offline ID mappings (SYMBOL/ENTREZ/UNIPROT/ENSEMBL/REFSEQ)")
 	cmd.StringVar(&c.idMapsLevel, "idmaps-level", "basic", "ID mapping level when used with --db --idmaps: basic (KEGG list/link) or extended (NCBI+UniProt dumps; larger but more complete)")
+	cmd.IntVar(&c.idMapsRetries, "idmaps-retries", 2, "Retry count for --idmaps sync on timeout/transient network errors")
+	cmd.DurationVar(&c.idMapsRetryBackoff, "idmaps-retry-backoff", 20*time.Second, "Backoff between --idmaps retries")
+	cmd.DurationVar(&c.idMapsTimeout, "idmaps-timeout", 240*time.Minute, "Per-attempt timeout for writing --idmaps into SQLite")
+	cmd.DurationVar(&c.idMapsHTTPTimeout, "idmaps-http-timeout", 45*time.Minute, "HTTP timeout for a single --idmaps download request (extended mode)")
+	cmd.BoolVar(&c.reactomeAutoRetry, "reactome-auto-retry", true, "Automatically retry Reactome download on transient network/server failures")
+	cmd.IntVar(&c.reactomeRetries, "reactome-retries", 2, "Retry count for Reactome download when --reactome-auto-retry=true")
+	cmd.DurationVar(&c.reactomeRetryBackoff, "reactome-retry-backoff", 15*time.Second, "Backoff between Reactome download retries")
 
 	cmd.Parse(os.Args[2:])
+
+	if c.idMapsRetries < 0 {
+		fmt.Fprintf(os.Stderr, "Error: --idmaps-retries must be >= 0 (got %d)\n", c.idMapsRetries)
+		os.Exit(1)
+	}
+	if c.idMapsRetryBackoff < 0 {
+		fmt.Fprintf(os.Stderr, "Error: --idmaps-retry-backoff must be >= 0 (got %s)\n", c.idMapsRetryBackoff)
+		os.Exit(1)
+	}
+	if c.idMapsTimeout <= 0 {
+		fmt.Fprintf(os.Stderr, "Error: --idmaps-timeout must be > 0 (got %s)\n", c.idMapsTimeout)
+		os.Exit(1)
+	}
+	if c.idMapsHTTPTimeout <= 0 {
+		fmt.Fprintf(os.Stderr, "Error: --idmaps-http-timeout must be > 0 (got %s)\n", c.idMapsHTTPTimeout)
+		os.Exit(1)
+	}
+	if c.reactomeRetries < 0 {
+		fmt.Fprintf(os.Stderr, "Error: --reactome-retries must be >= 0 (got %d)\n", c.reactomeRetries)
+		os.Exit(1)
+	}
+	if c.reactomeRetryBackoff < 0 {
+		fmt.Fprintf(os.Stderr, "Error: --reactome-retry-backoff must be >= 0 (got %s)\n", c.reactomeRetryBackoff)
+		os.Exit(1)
+	}
 
 	outputDir := c.outputDir
 	if c.dbOnly {
@@ -144,7 +186,12 @@ func runDownload(cmd *flag.FlagSet) {
 
 	runReactome := func() {
 		fmt.Printf("Downloading Reactome data for %s...\n", c.species)
-		data, err := database.LoadOrDownloadReactome(c.species, outputDir)
+		opts := &database.ReactomeDownloadOptions{
+			AutoRetry:    c.reactomeAutoRetry,
+			MaxRetries:   c.reactomeRetries,
+			RetryBackoff: c.reactomeRetryBackoff,
+		}
+		data, err := database.LoadOrDownloadReactomeWithOptions(c.species, outputDir, opts)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -180,25 +227,23 @@ func runDownload(cmd *flag.FlagSet) {
 
 	if st != nil && c.withIDMaps {
 		level := strings.ToLower(strings.TrimSpace(c.idMapsLevel))
-		if level == "extended" {
-			// Extended mappings can take a long time on slow networks.
-			cancel()
-			ctx, cancel = context.WithTimeout(context.Background(), 240*time.Minute)
-			defer cancel()
+		if level == "" {
+			level = "basic"
 		}
-		switch level {
-		case "", "basic":
-			if err := writeBasicIDMapsToSQLite(ctx, st, c.species); err != nil {
-				fmt.Fprintf(os.Stderr, "Error writing idmaps to sqlite: %v\n", err)
-				os.Exit(1)
-			}
-		case "extended":
-			if err := writeExtendedIDMapsToSQLite(ctx, st, c.species); err != nil {
-				fmt.Fprintf(os.Stderr, "Error writing idmaps to sqlite: %v\n", err)
-				os.Exit(1)
-			}
-		default:
-			fmt.Fprintf(os.Stderr, "Error: unknown --idmaps-level %q (use basic or extended)\n", c.idMapsLevel)
+		var idMapClient database.HTTPClient
+		if level == "extended" {
+			idMapClient = netutil.NewClient(netutil.Options{Timeout: c.idMapsHTTPTimeout})
+		}
+		if err := writeIDMapsToSQLiteWithRetry(
+			st,
+			c.species,
+			level,
+			c.idMapsTimeout,
+			c.idMapsRetries,
+			c.idMapsRetryBackoff,
+			idMapClient,
+		); err != nil {
+			fmt.Fprintf(os.Stderr, "Error writing idmaps to sqlite: %v\n", err)
 			os.Exit(1)
 		}
 	}
@@ -321,7 +366,7 @@ func writeBasicIDMapsToSQLite(ctx context.Context, st *store.SQLiteStore, specie
 	return nil
 }
 
-func writeExtendedIDMapsToSQLite(ctx context.Context, st *store.SQLiteStore, species string) error {
+func writeExtendedIDMapsToSQLite(ctx context.Context, st *store.SQLiteStore, species string, client database.HTTPClient) error {
 	taxID, err := database.TaxIDForSpecies(species)
 	if err != nil {
 		return err
@@ -329,7 +374,7 @@ func writeExtendedIDMapsToSQLite(ctx context.Context, st *store.SQLiteStore, spe
 
 	// NCBI gene_info: SYMBOL <-> ENTREZ
 	if err := st.ReplaceIDMapStream(ctx, species, "ncbi_gene_info", string(annotation.IDEntrez), string(annotation.IDSymbol), func(emit store.IDMapEmit) error {
-		return database.StreamNCBIGeneInfoForSpecies(species, taxID, nil,
+		return database.StreamNCBIGeneInfoForSpecies(species, taxID, client,
 			func(entrez, symbol string) error { return emit(entrez, symbol) },
 			func(symbol, entrez string) error { return nil },
 		)
@@ -337,7 +382,7 @@ func writeExtendedIDMapsToSQLite(ctx context.Context, st *store.SQLiteStore, spe
 		return err
 	}
 	if err := st.ReplaceIDMapStream(ctx, species, "ncbi_gene_info", string(annotation.IDSymbol), string(annotation.IDEntrez), func(emit store.IDMapEmit) error {
-		return database.StreamNCBIGeneInfoForSpecies(species, taxID, nil,
+		return database.StreamNCBIGeneInfoForSpecies(species, taxID, client,
 			func(entrez, symbol string) error { return nil },
 			func(symbol, entrez string) error { return emit(symbol, entrez) },
 		)
@@ -347,7 +392,7 @@ func writeExtendedIDMapsToSQLite(ctx context.Context, st *store.SQLiteStore, spe
 
 	// NCBI gene2ensembl: ENSEMBL <-> ENTREZ
 	if err := st.ReplaceIDMapStream(ctx, species, "ncbi_gene2ensembl", string(annotation.IDEnsembl), string(annotation.IDEntrez), func(emit store.IDMapEmit) error {
-		return database.StreamNCBIGene2Ensembl(taxID, nil,
+		return database.StreamNCBIGene2Ensembl(taxID, client,
 			func(ensembl, entrez string) error { return emit(ensembl, entrez) },
 			func(entrez, ensembl string) error { return nil },
 		)
@@ -355,7 +400,7 @@ func writeExtendedIDMapsToSQLite(ctx context.Context, st *store.SQLiteStore, spe
 		return err
 	}
 	if err := st.ReplaceIDMapStream(ctx, species, "ncbi_gene2ensembl", string(annotation.IDEntrez), string(annotation.IDEnsembl), func(emit store.IDMapEmit) error {
-		return database.StreamNCBIGene2Ensembl(taxID, nil,
+		return database.StreamNCBIGene2Ensembl(taxID, client,
 			func(ensembl, entrez string) error { return nil },
 			func(entrez, ensembl string) error { return emit(entrez, ensembl) },
 		)
@@ -365,7 +410,7 @@ func writeExtendedIDMapsToSQLite(ctx context.Context, st *store.SQLiteStore, spe
 
 	// NCBI gene2refseq: REFSEQ <-> ENTREZ
 	if err := st.ReplaceIDMapStream(ctx, species, "ncbi_gene2refseq", string(annotation.IDRefSeq), string(annotation.IDEntrez), func(emit store.IDMapEmit) error {
-		return database.StreamNCBIGene2RefSeq(taxID, nil,
+		return database.StreamNCBIGene2RefSeq(taxID, client,
 			func(refseq, entrez string) error { return emit(refseq, entrez) },
 			func(entrez, refseq string) error { return nil },
 		)
@@ -373,7 +418,7 @@ func writeExtendedIDMapsToSQLite(ctx context.Context, st *store.SQLiteStore, spe
 		return err
 	}
 	if err := st.ReplaceIDMapStream(ctx, species, "ncbi_gene2refseq", string(annotation.IDEntrez), string(annotation.IDRefSeq), func(emit store.IDMapEmit) error {
-		return database.StreamNCBIGene2RefSeq(taxID, nil,
+		return database.StreamNCBIGene2RefSeq(taxID, client,
 			func(refseq, entrez string) error { return nil },
 			func(entrez, refseq string) error { return emit(entrez, refseq) },
 		)
@@ -383,7 +428,7 @@ func writeExtendedIDMapsToSQLite(ctx context.Context, st *store.SQLiteStore, spe
 
 	// UniProt idmapping_selected: UNIPROT <-> ENTREZ
 	if err := st.ReplaceIDMapStream(ctx, species, "uniprot_idmapping_selected", string(annotation.IDUniprot), string(annotation.IDEntrez), func(emit store.IDMapEmit) error {
-		return database.StreamUniProtIDMappingSelected(taxID, nil,
+		return database.StreamUniProtIDMappingSelected(taxID, client,
 			func(uniprot, entrez string) error { return emit(uniprot, entrez) },
 			func(entrez, uniprot string) error { return nil },
 		)
@@ -391,7 +436,7 @@ func writeExtendedIDMapsToSQLite(ctx context.Context, st *store.SQLiteStore, spe
 		return err
 	}
 	if err := st.ReplaceIDMapStream(ctx, species, "uniprot_idmapping_selected", string(annotation.IDEntrez), string(annotation.IDUniprot), func(emit store.IDMapEmit) error {
-		return database.StreamUniProtIDMappingSelected(taxID, nil,
+		return database.StreamUniProtIDMappingSelected(taxID, client,
 			func(uniprot, entrez string) error { return nil },
 			func(entrez, uniprot string) error { return emit(entrez, uniprot) },
 		)
@@ -400,8 +445,168 @@ func writeExtendedIDMapsToSQLite(ctx context.Context, st *store.SQLiteStore, spe
 	}
 
 	// Keep KEGG-derived maps as additional fallback (best-effort).
-	if err := writeBasicIDMapsToSQLite(ctx, st, species); err != nil {
+	if err := writeKEGGFallbackIDMapsBestEffort(ctx, species, 2, 5*time.Second, func(innerCtx context.Context, sp string) error {
+		return writeBasicIDMapsToSQLite(innerCtx, st, sp)
+	}); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to write KEGG fallback idmaps: %v\n", err)
 	}
 	return nil
+}
+
+func writeKEGGFallbackIDMapsBestEffort(
+	ctx context.Context,
+	species string,
+	retries int,
+	backoff time.Duration,
+	write func(context.Context, string) error,
+) error {
+	if write == nil {
+		return fmt.Errorf("kegg fallback writer is nil")
+	}
+	if retries < 0 {
+		return fmt.Errorf("invalid kegg fallback retries %d", retries)
+	}
+	if backoff < 0 {
+		return fmt.Errorf("invalid kegg fallback backoff %s", backoff)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "Info: skipping KEGG fallback idmaps because context is done: %v\n", err)
+		return nil
+	}
+
+	totalAttempts := retries + 1
+	var lastErr error
+	for attempt := 1; attempt <= totalAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			fmt.Fprintf(os.Stderr, "Info: skipping KEGG fallback idmaps because context is done: %v\n", err)
+			return nil
+		}
+		err := write(ctx, species)
+		if err == nil {
+			if attempt > 1 {
+				fmt.Fprintf(os.Stderr, "Info: KEGG fallback idmaps succeeded on retry %d/%d\n", attempt, totalAttempts)
+			}
+			return nil
+		}
+		lastErr = err
+		if attempt == totalAttempts || !isRetryableIDMapError(err) {
+			break
+		}
+		fmt.Fprintf(os.Stderr, "Info: KEGG fallback idmaps attempt %d/%d failed: %v\n", attempt, totalAttempts, err)
+		if backoff > 0 {
+			fmt.Fprintf(os.Stderr, "Info: retrying KEGG fallback idmaps in %s...\n", backoff)
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				fmt.Fprintf(os.Stderr, "Info: skipping KEGG fallback idmaps because context is done: %v\n", ctx.Err())
+				return nil
+			}
+		}
+	}
+	if lastErr == nil {
+		return nil
+	}
+	if errors.Is(lastErr, context.Canceled) || errors.Is(lastErr, context.DeadlineExceeded) || isRetryableIDMapError(lastErr) {
+		fmt.Fprintf(os.Stderr, "Info: skipping KEGG fallback idmaps after retry budget: %v\n", lastErr)
+		return nil
+	}
+	return lastErr
+}
+
+func writeIDMapsToSQLiteWithRetry(
+	st *store.SQLiteStore,
+	species, level string,
+	attemptTimeout time.Duration,
+	retries int,
+	backoff time.Duration,
+	client database.HTTPClient,
+) error {
+	if st == nil {
+		return fmt.Errorf("sqlite store is nil")
+	}
+	if attemptTimeout <= 0 {
+		return fmt.Errorf("invalid idmaps timeout %s", attemptTimeout)
+	}
+	if retries < 0 {
+		return fmt.Errorf("invalid idmaps retries %d", retries)
+	}
+	if backoff < 0 {
+		return fmt.Errorf("invalid idmaps retry backoff %s", backoff)
+	}
+
+	level = strings.ToLower(strings.TrimSpace(level))
+	if level == "" {
+		level = "basic"
+	}
+	if level != "basic" && level != "extended" {
+		return fmt.Errorf("unknown --idmaps-level %q (use basic or extended)", level)
+	}
+
+	totalAttempts := retries + 1
+	var lastErr error
+	for attempt := 1; attempt <= totalAttempts; attempt++ {
+		attemptCtx, cancel := context.WithTimeout(context.Background(), attemptTimeout)
+		var err error
+		switch level {
+		case "basic":
+			err = writeBasicIDMapsToSQLite(attemptCtx, st, species)
+		case "extended":
+			err = writeExtendedIDMapsToSQLite(attemptCtx, st, species, client)
+		}
+		cancel()
+		if err == nil {
+			if attempt > 1 {
+				fmt.Fprintf(os.Stderr, "Info: idmaps sync succeeded on retry %d/%d\n", attempt, totalAttempts)
+			}
+			return nil
+		}
+
+		lastErr = err
+		if attempt == totalAttempts || !isRetryableIDMapError(err) {
+			break
+		}
+		fmt.Fprintf(os.Stderr, "Warning: idmaps sync attempt %d/%d failed: %v\n", attempt, totalAttempts, err)
+		if backoff > 0 {
+			fmt.Fprintf(os.Stderr, "Warning: retrying idmaps sync in %s...\n", backoff)
+			time.Sleep(backoff)
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("idmaps sync failed without explicit error")
+	}
+	return lastErr
+}
+
+func isRetryableIDMapError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"context deadline exceeded",
+		"client.timeout",
+		"timeout",
+		"i/o timeout",
+		"tls handshake timeout",
+		"connection reset",
+		"connection refused",
+		"temporary failure",
+		"temporarily unavailable",
+		"unexpected eof",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
 }
