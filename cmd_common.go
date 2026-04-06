@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -20,6 +21,67 @@ func targetIDTypeForDatabase(db string) annotation.IDType {
 	default:
 		// custom/unknown: 不强制转换，沿用输入 ID
 		return annotation.IDUnknown
+	}
+}
+
+func parseConversionPolicy(raw string) (annotation.ConversionPolicy, error) {
+	v := strings.TrimSpace(strings.ToLower(raw))
+	switch v {
+	case "", "threshold":
+		return annotation.ConversionPolicyThreshold, nil
+	case "strict":
+		return annotation.ConversionPolicyStrict, nil
+	case "best-effort", "best_effort", "besteffort":
+		return annotation.ConversionPolicyBestEffort, nil
+	default:
+		return "", fmt.Errorf("unknown id conversion policy %q (use strict, threshold, best-effort)", raw)
+	}
+}
+
+type strictModePolicy struct {
+	AutoUpdateDB              bool
+	EnableOnlineIDMapFallback bool
+	AllowIDFallback           bool
+	IDConversionPolicy        string
+	MinConversionRate         float64
+}
+
+func applyStrictModeOverrides(strictMode bool, policy *strictModePolicy) {
+	if !strictMode || policy == nil {
+		return
+	}
+	policy.AutoUpdateDB = false
+	policy.EnableOnlineIDMapFallback = false
+	policy.AllowIDFallback = false
+	policy.IDConversionPolicy = "threshold"
+	if policy.MinConversionRate < 0.90 {
+		policy.MinConversionRate = 0.90
+	}
+}
+
+func printConversionReport(report *annotation.ConversionReport, minRate float64) {
+	if report == nil {
+		return
+	}
+	fmt.Printf(
+		"ID conversion summary: mapped=%d/%d unmapped=%d rate=%.2f%% policy=%s min_rate=%.2f\n",
+		report.Mapped,
+		report.Total,
+		report.Unmapped,
+		report.ConversionRate*100,
+		report.Policy,
+		minRate,
+	)
+	if len(report.LayerHits) == 0 {
+		return
+	}
+	layers := make([]string, 0, len(report.LayerHits))
+	for name := range report.LayerHits {
+		layers = append(layers, name)
+	}
+	sort.Strings(layers)
+	for _, name := range layers {
+		fmt.Printf("  idmap_layer_hits[%s]=%d\n", name, report.LayerHits[name])
 	}
 }
 

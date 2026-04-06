@@ -131,3 +131,88 @@ func TestResolveKEGGIDCacheMaxEntries(t *testing.T) {
 		t.Fatalf("flag overrides env: v=%d ok=%v err=%v", v, ok, err)
 	}
 }
+
+func TestParseConversionPolicy(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    annotation.ConversionPolicy
+		wantErr bool
+	}{
+		{name: "default threshold", input: "", want: annotation.ConversionPolicyThreshold},
+		{name: "strict", input: "strict", want: annotation.ConversionPolicyStrict},
+		{name: "best effort dash", input: "best-effort", want: annotation.ConversionPolicyBestEffort},
+		{name: "best effort underscore", input: "best_effort", want: annotation.ConversionPolicyBestEffort},
+		{name: "invalid", input: "foo", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseConversionPolicy(tc.input)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("parseConversionPolicy(%q)=%q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestApplyStrictModeOverrides(t *testing.T) {
+	t.Run("disabled keeps values", func(t *testing.T) {
+		p := strictModePolicy{
+			AutoUpdateDB:              true,
+			EnableOnlineIDMapFallback: true,
+			AllowIDFallback:           true,
+			IDConversionPolicy:        "best-effort",
+			MinConversionRate:         0.50,
+		}
+		applyStrictModeOverrides(false, &p)
+		if !p.AutoUpdateDB || !p.EnableOnlineIDMapFallback || !p.AllowIDFallback {
+			t.Fatalf("policy unexpectedly changed when strict mode disabled: %+v", p)
+		}
+		if p.IDConversionPolicy != "best-effort" || p.MinConversionRate != 0.50 {
+			t.Fatalf("policy unexpectedly changed when strict mode disabled: %+v", p)
+		}
+	})
+
+	t.Run("enabled enforces fail-fast defaults", func(t *testing.T) {
+		p := strictModePolicy{
+			AutoUpdateDB:              true,
+			EnableOnlineIDMapFallback: true,
+			AllowIDFallback:           true,
+			IDConversionPolicy:        "best-effort",
+			MinConversionRate:         0.50,
+		}
+		applyStrictModeOverrides(true, &p)
+		if p.AutoUpdateDB || p.EnableOnlineIDMapFallback || p.AllowIDFallback {
+			t.Fatalf("strict mode should disable fallback toggles: %+v", p)
+		}
+		if p.IDConversionPolicy != "threshold" {
+			t.Fatalf("strict mode policy=%q, want threshold", p.IDConversionPolicy)
+		}
+		if p.MinConversionRate != 0.90 {
+			t.Fatalf("strict mode min conversion rate=%.2f, want 0.90", p.MinConversionRate)
+		}
+	})
+
+	t.Run("enabled keeps higher threshold", func(t *testing.T) {
+		p := strictModePolicy{
+			AutoUpdateDB:              true,
+			EnableOnlineIDMapFallback: true,
+			AllowIDFallback:           true,
+			IDConversionPolicy:        "strict",
+			MinConversionRate:         0.95,
+		}
+		applyStrictModeOverrides(true, &p)
+		if p.MinConversionRate != 0.95 {
+			t.Fatalf("strict mode should keep higher threshold, got %.2f", p.MinConversionRate)
+		}
+	})
+}

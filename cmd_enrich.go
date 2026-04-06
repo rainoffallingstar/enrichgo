@@ -5,13 +5,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"enrichgo/pkg/analysis"
 	"enrichgo/pkg/annotation"
-	"enrichgo/pkg/database"
 	"enrichgo/pkg/io"
 	"enrichgo/pkg/store"
 )
@@ -36,17 +34,22 @@ type enrichCmd struct {
 	qvalue       float64
 	noFilter     bool
 	// 显著基因过滤参数
-	sigCol           string  // 字符串过滤列名（如 "significant"）
-	sigVal           string  // 字符串过滤值（如 "TRUE"）
-	fdrCol           string  // 数值过滤列名（如 "FDR"）
-	fdrThreshold     float64 // 数值过滤阈值（如 0.05）
-	useAllBackground bool    // 使用表格全部基因作为 ORA 背景
-	allowIDFallback  bool    // ID 转换失败时允许回退到原始 ID
-	idCacheMax       int     // KEGG ID 转换缓存上限（每个 bucket）
-	useEmbeddedDB    bool    // --db 未提供时是否使用嵌入的默认 SQLite
-	updateDB         bool    // 运行前是否先更新 SQLite 数据
-	updateDBIDMaps   bool    // 更新时是否同步刷新 ID 映射
-	updateDBIDLevel  string  // 更新时 ID 映射级别（basic/extended）
+	sigCol                    string  // 字符串过滤列名（如 "significant"）
+	sigVal                    string  // 字符串过滤值（如 "TRUE"）
+	fdrCol                    string  // 数值过滤列名（如 "FDR"）
+	fdrThreshold              float64 // 数值过滤阈值（如 0.05）
+	useAllBackground          bool    // 使用表格全部基因作为 ORA 背景
+	allowIDFallback           bool    // ID 转换失败时允许回退到原始 ID
+	idConversionPolicy        string  // ID 转换策略: strict/threshold/best-effort
+	minConversionRate         float64 // threshold 策略下最小转换率
+	enableOnlineIDMapFallback bool    // 是否启用在线 ID 映射回退
+	idCacheMax                int     // KEGG ID 转换缓存上限（每个 bucket）
+	useEmbeddedDB             bool    // --db 未提供时是否使用嵌入的默认 SQLite
+	autoUpdateDB              bool    // 自动扩容默认 runtime SQLite（可显式关闭）
+	strictMode                bool    // 严格模式：关闭自动兜底并启用失败即退出
+	updateDB                  bool    // 运行前是否先更新 SQLite 数据
+	updateDBIDMaps            bool    // 更新时是否同步刷新 ID 映射
+	updateDBIDLevel           string  // 更新时 ID 映射级别（basic/extended）
 	// 方向性分析参数
 	splitByDirection bool    // 是否按方向分别做 ORA
 	dirCol           string  // 方向列名
@@ -87,11 +90,16 @@ func runEnrich(cmd *flag.FlagSet) {
 	cmd.StringVar(&c.fdrCol, "fdr-col", "", "Column name for FDR/adjusted p-value (numeric filter; overrides --sig-col when set)")
 	cmd.Float64Var(&c.fdrThreshold, "fdr-threshold", 0.05, "FDR threshold for significant genes (used with --fdr-col)")
 	cmd.BoolVar(&c.useAllBackground, "use-all-background", true, "Use all genes in DEG table as ORA background (Universe)")
-	cmd.BoolVar(&c.allowIDFallback, "allow-id-fallback", false, "Continue with original IDs when ID conversion fails")
+	cmd.BoolVar(&c.allowIDFallback, "allow-id-fallback", true, "Continue with original IDs when ID conversion is incomplete")
+	cmd.StringVar(&c.idConversionPolicy, "id-conversion-policy", "best-effort", "ID conversion policy: strict, threshold, best-effort")
+	cmd.Float64Var(&c.minConversionRate, "min-conversion-rate", 0.50, "Minimum acceptable conversion rate when --id-conversion-policy=threshold")
+	cmd.BoolVar(&c.enableOnlineIDMapFallback, "enable-online-idmap-fallback", true, "Enable online KEGG fallback when offline ID mappings are missing")
 	cmd.IntVar(&c.idCacheMax, "kegg-id-cache-max-entries", 0, "Max entries per KEGG ID conversion cache bucket. 0=default; <0=disable eviction. Env: "+envKEGGIDCacheMaxEntries)
 	cmd.BoolVar(&c.useEmbeddedDB, "use-embedded-db", true, "When --db is empty, use bundled embedded SQLite DB by default")
+	cmd.BoolVar(&c.autoUpdateDB, "auto-update-db", true, "Auto-expand runtime SQLite DB when requested database coverage is missing (set false to disable)")
+	cmd.BoolVar(&c.strictMode, "strict-mode", false, "Disable automatic fallback behavior and enforce fail-fast conversion policy")
 	cmd.BoolVar(&c.updateDB, "update-db", false, "Before analysis, run download update into target SQLite DB")
-	cmd.BoolVar(&c.updateDBIDMaps, "update-db-idmaps", false, "When --update-db, also refresh offline ID mappings")
+	cmd.BoolVar(&c.updateDBIDMaps, "update-db-idmaps", true, "When --update-db, also refresh offline ID mappings")
 	cmd.StringVar(&c.updateDBIDLevel, "update-db-idmaps-level", "basic", "When --update-db-idmaps, choose basic or extended")
 	// 方向性分析
 	cmd.BoolVar(&c.splitByDirection, "split-by-direction", true, "Run separate ORA for Up/Down regulated genes")
@@ -106,9 +114,32 @@ func runEnrich(cmd *flag.FlagSet) {
 
 	cmd.Parse(os.Args[2:])
 
+	policy := strictModePolicy{
+		AutoUpdateDB:              c.autoUpdateDB,
+		EnableOnlineIDMapFallback: c.enableOnlineIDMapFallback,
+		AllowIDFallback:           c.allowIDFallback,
+		IDConversionPolicy:        c.idConversionPolicy,
+		MinConversionRate:         c.minConversionRate,
+	}
+	applyStrictModeOverrides(c.strictMode, &policy)
+	c.autoUpdateDB = policy.AutoUpdateDB
+	c.enableOnlineIDMapFallback = policy.EnableOnlineIDMapFallback
+	c.allowIDFallback = policy.AllowIDFallback
+	c.idConversionPolicy = policy.IDConversionPolicy
+	c.minConversionRate = policy.MinConversionRate
+
 	keggCacheMax, applyKEGGCacheMax, err := resolveKEGGIDCacheMaxEntries(c.idCacheMax)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	convPolicy, policyErr := parseConversionPolicy(c.idConversionPolicy)
+	if policyErr != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", policyErr)
+		os.Exit(1)
+	}
+	if c.minConversionRate <= 0 || c.minConversionRate > 1 {
+		fmt.Fprintf(os.Stderr, "Error: --min-conversion-rate must be in (0,1] (got %.4f)\n", c.minConversionRate)
 		os.Exit(1)
 	}
 
@@ -160,45 +191,23 @@ func runEnrich(cmd *flag.FlagSet) {
 		return
 	}
 
-	var st *store.SQLiteStore
-	effectiveDBPath := strings.TrimSpace(c.dbPath)
-	if effectiveDBPath == "" && c.useEmbeddedDB {
-		path, embedErr := ensureEmbeddedDefaultSQLiteDBFile()
-		if embedErr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to prepare embedded SQLite DB (%s): %v\n", embeddedDefaultSQLiteSHA256(), embedErr)
-		} else {
-			effectiveDBPath = path
-			fmt.Printf("Using embedded SQLite DB: %s\n", effectiveDBPath)
-		}
+	st, _, err := prepareRuntimeSQLite(runtimeSQLiteOptions{
+		Database:       c.database,
+		Species:        c.species,
+		Ontology:       c.ontology,
+		Collection:     c.collection,
+		DBPath:         c.dbPath,
+		UseEmbeddedDB:  c.useEmbeddedDB,
+		AutoUpdateDB:   c.autoUpdateDB,
+		UpdateDB:       c.updateDB,
+		UpdateDBIDMaps: c.updateDBIDMaps,
+		UpdateDBIDMode: c.updateDBIDLevel,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
-
-	if c.updateDB {
-		if effectiveDBPath == "" {
-			fmt.Fprintln(os.Stderr, "Error: --update-db requires --db or --use-embedded-db")
-			os.Exit(1)
-		}
-		fmt.Printf("Updating SQLite DB before analysis (db=%s, species=%s)...\n", c.database, c.species)
-		if err := runDownloadUpdateForDB(dbUpdateOptions{
-			Database:    c.database,
-			Species:     c.species,
-			Ontology:    c.ontology,
-			Collection:  c.collection,
-			DBPath:      effectiveDBPath,
-			WithIDMaps:  c.updateDBIDMaps,
-			IDMapsLevel: c.updateDBIDLevel,
-		}); err != nil {
-			fmt.Fprintf(os.Stderr, "Error updating sqlite db: %v\n", err)
-			os.Exit(1)
-		}
-	}
-
-	if effectiveDBPath != "" {
-		var err error
-		st, err = store.OpenSQLite(effectiveDBPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error opening sqlite db: %v\n", err)
-			os.Exit(1)
-		}
+	if st != nil {
 		defer st.Close()
 	}
 
@@ -237,108 +246,32 @@ func runEnrich(cmd *flag.FlagSet) {
 	}
 
 	// 1.5 自动 ID 类型检测和转换
-	targetIDType := targetIDTypeForDatabase(c.database)
-	shouldConvert := targetIDType != annotation.IDUnknown
-	if c.idType != "auto" {
-		switch c.idType {
-		case "entrez":
-			targetIDType = annotation.IDEntrez
-			shouldConvert = true
-		case "symbol":
-			targetIDType = annotation.IDSymbol
-			shouldConvert = true
-		case "uniprot":
-			targetIDType = annotation.IDUniprot
-			shouldConvert = true
-		case "kegg":
-			targetIDType = annotation.IDKEGG
-			shouldConvert = true
-		default:
-			fmt.Fprintf(os.Stderr, "Warning: unknown id-type '%s', using auto-detection\n", c.idType)
+	keggConv, err = applyIDConversionToInput(
+		input,
+		st,
+		idConversionOptions{
+			Database:                  c.database,
+			Species:                   c.species,
+			DataDir:                   c.dataDir,
+			IDType:                    c.idType,
+			AllowIDFallback:           c.allowIDFallback,
+			ConversionPolicy:          convPolicy,
+			MinConversionRate:         c.minConversionRate,
+			EnableOnlineIDMapFallback: c.enableOnlineIDMapFallback,
+			ApplyKEGGCacheMax:         applyKEGGCacheMax,
+			KEGGCacheMax:              keggCacheMax,
+		},
+		true,
+		displayGeneMap,
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		if !c.strictMode {
+			fmt.Fprintln(os.Stderr, "Hint: use --allow-id-fallback to continue with original IDs")
 		}
+		os.Exit(1)
 	}
-
-	// 自动检测输入 ID 类型并在需要时转换
-	detectedType := annotation.BatchDetectIDType(input.Genes)
-	if shouldConvert && detectedType != annotation.IDUnknown && detectedType != targetIDType {
-		fmt.Printf("Detected ID type: %s, converting to %s...\n", detectedType, targetIDType)
-		var converter annotation.IDConverter
-		if st != nil {
-			converter = annotation.NewSQLiteIDConverter(st)
-		} else {
-			kc := annotation.NewKEGGIDConverter(c.dataDir)
-			if applyKEGGCacheMax {
-				kc.SetMaxCacheEntries(keggCacheMax)
-			}
-			keggConv = kc
-			converter = kc
-		}
-
-		// 转换全部基因（包括背景）
-		convertedAll, allMapping, err := annotation.ConvertGeneID(input.AllGenes, targetIDType, c.species, converter)
-		if err != nil {
-			if !c.allowIDFallback {
-				fmt.Fprintf(os.Stderr, "Error: ID conversion failed: %v\n", err)
-				fmt.Fprintln(os.Stderr, "Hint: use --allow-id-fallback to continue with original IDs")
-				os.Exit(1)
-			}
-			fmt.Fprintf(os.Stderr, "Warning: ID conversion failed: %v, using original IDs\n", err)
-		} else {
-			mergeDisplayMapFromConversion(displayGeneMap, allMapping)
-			// 从映射中提取显著基因的转换 ID
-			sigSet := make(map[string]bool, len(input.Genes))
-			for _, g := range input.Genes {
-				sigSet[g] = true
-			}
-			var convertedSig []string
-			for origKey, newIDs := range allMapping {
-				if sigSet[origKey] {
-					convertedSig = append(convertedSig, newIDs...)
-				}
-			}
-			input.Genes = convertedSig
-			input.AllGenes = convertedAll
-			fmt.Printf("Converted %d significant genes (universe: %d)\n", len(convertedSig), len(convertedAll))
-
-			// 更新 GeneValues 的键
-			newValues := make(map[string]float64)
-			for origKey, newIDs := range allMapping {
-				if v, ok := input.GeneValues[origKey]; ok {
-					for _, newID := range newIDs {
-						newValues[newID] = v
-					}
-				}
-			}
-			input.GeneValues = newValues
-
-			// 更新 GeneDirections 的键
-			newDirs := make(map[string]string)
-			for origKey, newIDs := range allMapping {
-				if d, ok := input.GeneDirections[origKey]; ok {
-					for _, newID := range newIDs {
-						newDirs[newID] = d
-					}
-				}
-			}
-			input.GeneDirections = newDirs
-		}
-	}
-	if len(displayGeneMap) == 0 && strings.EqualFold(c.database, "kegg") {
-		if st != nil {
-			if m, err := loadEntrezSymbolMapFromSQLite(st, c.species); err == nil {
-				for k, v := range m {
-					displayGeneMap[k] = v
-				}
-			}
-		} else {
-			idmapPath := filepath.Join(c.dataDir, fmt.Sprintf("kegg_%s_idmap.tsv", c.species))
-			if m, err := loadEntrezSymbolMapFromIDMap(idmapPath); err == nil {
-				for k, v := range m {
-					displayGeneMap[k] = v
-				}
-			}
-		}
-	}
+	hydrateDisplayMapForKEGG(displayGeneMap, c.database, c.species, c.dataDir, st)
 
 	// 1.6 如无方向信息，尝试从 logFC（GeneValues）自动推断 Up/Down
 	if c.splitByDirection && len(input.GeneDirections) == 0 {
@@ -392,216 +325,54 @@ func runEnrich(cmd *flag.FlagSet) {
 
 	// 2. 加载基因集数据库
 	fmt.Printf("Loading database: %s...\n", c.database)
-	var geneSets analysis.GeneSets
 	var forcedUniverse []string
-
-	switch c.database {
-	case "kegg":
-		if st != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			sets, _, err := st.LoadGeneSets(ctx, store.GeneSetFilter{DB: "kegg", Species: c.species})
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error loading KEGG from sqlite: %v\n", err)
-				os.Exit(1)
-			}
-			geneSets = analysis.GeneSets(sets)
-		} else {
-			data, err := database.LoadOrDownloadKEGG(c.species, c.dataDir)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error loading KEGG data: %v\n", err)
-				os.Exit(1)
-			}
-			if data == nil {
-				fmt.Fprintln(os.Stderr, "Error: no KEGG data available")
-				os.Exit(1)
-			}
-			for _, pw := range data.Pathways {
-				gs := &analysis.GeneSet{
-					ID:          pw.ID,
-					Name:        pw.Name,
-					Genes:       pw.Genes,
-					Description: pw.Description,
-				}
-				geneSets = append(geneSets, gs)
-			}
-		}
-
-	case "go":
-		if st != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			sets, _, err := st.LoadGeneSets(ctx, store.GeneSetFilter{DB: "go", Species: c.species, Ontology: c.ontology})
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error loading GO from sqlite: %v\n", err)
-				os.Exit(1)
-			}
-			geneSets = analysis.GeneSets(sets)
-			annotatedGenes := make(map[string]bool)
-			for _, gs := range geneSets {
-				for gene := range gs.Genes {
-					annotatedGenes[gene] = true
-				}
-			}
-			if len(annotatedGenes) == 0 {
-				fmt.Fprintln(os.Stderr, "Error: GO annotation background is empty")
-				os.Exit(1)
-			}
-			if c.universeFile == "" {
-				filteredSig := make([]string, 0, len(input.Genes))
-				for _, g := range input.Genes {
-					if annotatedGenes[g] {
-						filteredSig = append(filteredSig, g)
-					}
-				}
-				if len(filteredSig) != len(input.Genes) {
-					fmt.Printf("GO annotation filter: kept %d/%d significant genes\n", len(filteredSig), len(input.Genes))
-				}
-				input.Genes = filteredSig
-				if len(input.Genes) == 0 {
-					fmt.Fprintln(os.Stderr, "Error: no significant genes remain after GO annotation filter")
-					os.Exit(1)
-				}
-				for gene := range annotatedGenes {
-					forcedUniverse = append(forcedUniverse, gene)
-				}
-			}
-		} else {
-			data, err := database.LoadOrDownloadGO(c.species, c.ontology, c.dataDir)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error loading GO data: %v\n", err)
-				os.Exit(1)
-			}
-			annotatedGenes := make(map[string]bool, len(data.Gene2Terms))
-			for gene, terms := range data.Gene2Terms {
-				if len(terms) > 0 {
-					annotatedGenes[gene] = true
-				}
-			}
-			if len(annotatedGenes) == 0 {
-				fmt.Fprintln(os.Stderr, "Error: GO annotation background is empty")
-				os.Exit(1)
-			}
-			if c.universeFile == "" {
-				filteredSig := make([]string, 0, len(input.Genes))
-				for _, g := range input.Genes {
-					if annotatedGenes[g] {
-						filteredSig = append(filteredSig, g)
-					}
-				}
-				if len(filteredSig) != len(input.Genes) {
-					fmt.Printf("GO annotation filter: kept %d/%d significant genes\n", len(filteredSig), len(input.Genes))
-				}
-				input.Genes = filteredSig
-				if len(input.Genes) == 0 {
-					fmt.Fprintln(os.Stderr, "Error: no significant genes remain after GO annotation filter")
-					os.Exit(1)
-				}
-				// 默认口径：GO ORA 背景使用可注释基因全集。
-				for gene := range annotatedGenes {
-					forcedUniverse = append(forcedUniverse, gene)
-				}
-			}
-			// 构建倒排索引 termID -> genes
-			term2genes := make(map[string]map[string]bool)
-			for gene, terms := range data.Gene2Terms {
-				for _, termID := range terms {
-					if term2genes[termID] == nil {
-						term2genes[termID] = make(map[string]bool)
-					}
-					term2genes[termID][gene] = true
-				}
-			}
-			for termID, term := range data.Terms {
-				gs := &analysis.GeneSet{
-					ID:          termID,
-					Name:        term.Name,
-					Genes:       term2genes[termID],
-					Description: term.Definition,
-				}
-				geneSets = append(geneSets, gs)
-			}
-		}
-
-	case "reactome":
-		if st != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			sets, _, err := st.LoadGeneSets(ctx, store.GeneSetFilter{DB: "reactome", Species: c.species})
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error loading Reactome from sqlite: %v\n", err)
-				os.Exit(1)
-			}
-			geneSets = analysis.GeneSets(sets)
-		} else {
-			data, err := database.LoadOrDownloadReactome(c.species, c.dataDir)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error loading Reactome data: %v\n", err)
-				os.Exit(1)
-			}
-			if data == nil || len(data.Pathways) == 0 {
-				fmt.Fprintln(os.Stderr, "Error: no Reactome data available")
-				os.Exit(1)
-			}
-			for _, pw := range data.Pathways {
-				gs := &analysis.GeneSet{
-					ID:          pw.ID,
-					Name:        pw.Name,
-					Genes:       pw.Genes,
-					Description: pw.Description,
-				}
-				geneSets = append(geneSets, gs)
-			}
-		}
-
-	case "msigdb":
-		collections, err := parseMSigDBCollections(c.collection)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		if st != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			seen := make(map[string]bool)
-			for _, col := range collections {
-				sets, _, err := st.LoadGeneSets(ctx, store.GeneSetFilter{DB: "msigdb", Species: c.species, Collection: string(col)})
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error loading MSigDB from sqlite: %v\n", err)
-					os.Exit(1)
-				}
-				for _, gs := range sets {
-					if gs == nil || seen[gs.ID] {
-						continue
-					}
-					seen[gs.ID] = true
-					geneSets = append(geneSets, gs)
-				}
-			}
-		} else {
-			sets, err := database.LoadOrDownloadMSigDBCollections(collections, c.dataDir)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error loading MSigDB: %v\n", err)
-				os.Exit(1)
-			}
-			geneSets = sets
-		}
-
-	case "custom":
-		if c.gmtFile == "" {
-			fmt.Println("Error: -gmt is required for custom database")
-			os.Exit(1)
-		}
-		sets, err := database.LoadGMTFile(c.gmtFile)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error loading GMT file: %v\n", err)
-			os.Exit(1)
-		}
-		geneSets = sets
-
-	default:
-		fmt.Printf("Error: unknown database: %s\n", c.database)
+	loaded, err := loadGeneSetsWithAnnotations(geneSetLoadOptions{
+		Database:   c.database,
+		Species:    c.species,
+		Ontology:   c.ontology,
+		Collection: c.collection,
+		GMTFile:    c.gmtFile,
+		DataDir:    c.dataDir,
+		Store:      st,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading database: %v\n", err)
 		os.Exit(1)
+	}
+	geneSets := loaded.GeneSets
+
+	if len(geneSets) == 0 {
+		fmt.Fprintf(os.Stderr, "Error: no gene sets loaded for database=%s species=%s\n", c.database, c.species)
+		if !c.strictMode {
+			fmt.Fprintln(os.Stderr, "Hint: try --update-db or verify requested coverage in --db")
+		}
+		os.Exit(1)
+	}
+
+	if strings.EqualFold(c.database, "go") {
+		if len(loaded.AnnotatedGenes) == 0 {
+			fmt.Fprintln(os.Stderr, "Error: GO annotation background is empty")
+			os.Exit(1)
+		}
+		if c.universeFile == "" {
+			filteredSig := make([]string, 0, len(input.Genes))
+			for _, g := range input.Genes {
+				if loaded.AnnotatedGenes[g] {
+					filteredSig = append(filteredSig, g)
+				}
+			}
+			if len(filteredSig) != len(input.Genes) {
+				fmt.Printf("GO annotation filter: kept %d/%d significant genes\n", len(filteredSig), len(input.Genes))
+			}
+			input.Genes = filteredSig
+			if len(input.Genes) == 0 {
+				fmt.Fprintln(os.Stderr, "Error: no significant genes remain after GO annotation filter")
+				os.Exit(1)
+			}
+			for gene := range loaded.AnnotatedGenes {
+				forcedUniverse = append(forcedUniverse, gene)
+			}
+		}
 	}
 
 	fmt.Printf("Loaded %d gene sets\n", len(geneSets))

@@ -14,6 +14,10 @@ type AuditReport struct {
 	IndexesValid         bool             `json:"indexes_valid"`
 	ValidationError      string           `json:"validation_error,omitempty"`
 	RowCounts            map[string]int64 `json:"row_counts"`
+
+	ContractProfile    string   `json:"contract_profile,omitempty"`
+	ContractValid      bool     `json:"contract_valid"`
+	ContractViolations []string `json:"contract_violations,omitempty"`
 }
 
 func (s *SQLiteStore) Audit(ctx context.Context) (*AuditReport, error) {
@@ -24,6 +28,7 @@ func (s *SQLiteStore) Audit(ctx context.Context) (*AuditReport, error) {
 	r := &AuditReport{
 		CurrentSchemaVersion: CurrentSchemaVersion,
 		RowCounts:            make(map[string]int64),
+		ContractValid:        true,
 	}
 
 	version, hasVersion, err := readSchemaVersion(ctx, s.db)
@@ -39,15 +44,15 @@ func (s *SQLiteStore) Audit(ctx context.Context) (*AuditReport, error) {
 	case !hasVersion:
 		tableErr = fmt.Errorf("missing schema version marker")
 		indexErr = tableErr
-	case version == 1:
-		tableErr = validateSchemaV1CoreTables(ctx, s.db)
+	case version == CurrentSchemaVersion:
+		tableErr = validateSchemaV2CoreTables(ctx, s.db)
 		if tableErr == nil {
-			tableErr = validateSchemaV1MetaTable(ctx, s.db)
+			tableErr = validateSchemaV2MetaTable(ctx, s.db)
 		}
-		indexErr = validateSchemaV1Indexes(ctx, s.db)
-	case version == 0:
-		tableErr = nil
-		indexErr = nil
+		indexErr = validateSchemaV2Indexes(ctx, s.db)
+	case version < CurrentSchemaVersion:
+		tableErr = fmt.Errorf("schema version %d is no longer supported", version)
+		indexErr = tableErr
 	default:
 		tableErr = fmt.Errorf("unsupported schema version %d", version)
 		indexErr = tableErr
@@ -63,7 +68,7 @@ func (s *SQLiteStore) Audit(ctx context.Context) (*AuditReport, error) {
 		r.ValidationError = indexErr.Error()
 	}
 
-	for _, table := range []string{"meta", "geneset", "geneset_gene", "idmap"} {
+	for _, table := range []string{"meta", "dataset", "term", "gene_dict", "term_gene", "idmap_canon"} {
 		count, exists, err := countRows(ctx, s, table)
 		if err != nil {
 			return nil, err
@@ -73,6 +78,43 @@ func (s *SQLiteStore) Audit(ctx context.Context) (*AuditReport, error) {
 		}
 	}
 
+	// Backward-compatible aliases for downstream consumers expecting v1 names.
+	if n, ok := r.RowCounts["term"]; ok {
+		r.RowCounts["geneset"] = n
+	}
+	if n, ok := r.RowCounts["term_gene"]; ok {
+		r.RowCounts["geneset_gene"] = n
+	}
+	if n, ok := r.RowCounts["idmap_canon"]; ok {
+		r.RowCounts["idmap"] = n
+	}
+
+	return r, nil
+}
+
+func (s *SQLiteStore) AuditWithContract(ctx context.Context, profile string) (*AuditReport, error) {
+	r, err := s.Audit(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	profile = strings.TrimSpace(strings.ToLower(profile))
+	if profile == "" {
+		r.ContractValid = true
+		return r, nil
+	}
+	r.ContractProfile = profile
+
+	contract, err := resolveAuditContract(profile)
+	if err != nil {
+		return nil, err
+	}
+	violations, err := evaluateAuditContract(ctx, s, r, contract)
+	if err != nil {
+		return nil, err
+	}
+	r.ContractViolations = violations
+	r.ContractValid = len(violations) == 0
 	return r, nil
 }
 
@@ -92,7 +134,7 @@ func countRows(ctx context.Context, s *SQLiteStore, table string) (int64, bool, 
 	return n, true, nil
 }
 
-func (r *AuditReport) Healthy() bool {
+func (r *AuditReport) CoreHealthy() bool {
 	if r == nil {
 		return false
 	}
@@ -106,4 +148,14 @@ func (r *AuditReport) Healthy() bool {
 		return false
 	}
 	return strings.TrimSpace(r.ValidationError) == ""
+}
+
+func (r *AuditReport) Healthy() bool {
+	if !r.CoreHealthy() {
+		return false
+	}
+	if strings.TrimSpace(r.ContractProfile) != "" && !r.ContractValid {
+		return false
+	}
+	return true
 }

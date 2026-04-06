@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       idmaps_level:
-        description: "SQLite DB ID mapping level for packaged .db artifact: basic or extended"
+        description: "Optional extra packaged .db level for workflow_dispatch: set to extended to attempt a non-blocking extended artifact; required basic artifact is always built"
         required: false
         default: "basic"
       species:
@@ -81,12 +81,12 @@ jobs:
           # Build a bootstrap binary using repository seed DB, then refresh embed DB before final build.
           CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /tmp/enrichgo-bootstrap .
 
-          /tmp/enrichgo-bootstrap download \
+          /tmp/enrichgo-bootstrap data sync \
             -d all -s "${EMBED_SPECIES}" -ont ALL -c all \
             --db "assets/default_enrichgo.db" --db-only \
             --idmaps --idmaps-level "${EMBED_IDMAPS_LEVEL}"
 
-          audit_output="$(/tmp/enrichgo-bootstrap db-audit --db "assets/default_enrichgo.db")"
+          audit_output="$(/tmp/enrichgo-bootstrap db audit --db "assets/default_enrichgo.db")"
           echo "$audit_output"
 
           extract_value() {
@@ -144,12 +144,12 @@ jobs:
           build_one darwin arm64
           build_one windows amd64
 
-      - name: Build packaged SQLite DB artifact
+      - name: Build required packaged SQLite DB artifact (basic)
         shell: bash
         env:
           TAG: ${{ steps.tag.outputs.tag }}
           SPECIES: ${{ github.event.inputs.species || 'hsa' }}
-          IDMAPS_LEVEL: ${{ github.event.inputs.idmaps_level || 'basic' }}
+          IDMAPS_LEVEL: basic
           EMBED_SPECIES: hsa
           EMBED_IDMAPS_LEVEL: basic
         run: |
@@ -161,14 +161,43 @@ jobs:
           if [[ "${SPECIES}" == "${EMBED_SPECIES}" && "${IDMAPS_LEVEL}" == "${EMBED_IDMAPS_LEVEL}" ]]; then
             cp assets/default_enrichgo.db "${db_path}"
           else
-            /tmp/enrichgo-bootstrap download \
+            /tmp/enrichgo-bootstrap data sync \
               -d all -s "${SPECIES}" -ont ALL -c all \
               --db "${db_path}" --db-only \
               --idmaps --idmaps-level "${IDMAPS_LEVEL}"
-            /tmp/enrichgo-bootstrap db-audit --db "${db_path}"
+            /tmp/enrichgo-bootstrap db audit --db "${db_path}"
           fi
 
           gzip -9 "${db_path}"
+
+      - name: Build optional packaged SQLite DB artifact (extended, non-blocking)
+        id: build_optional_extended
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.idmaps_level == 'extended' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          SPECIES: ${{ github.event.inputs.species || 'hsa' }}
+          IDMAPS_LEVEL: extended
+        run: |
+          set -euo pipefail
+
+          db_base="enrichgo_db_${TAG}_${SPECIES}_${IDMAPS_LEVEL}.db"
+          db_path="dist/${db_base}"
+
+          /tmp/enrichgo-bootstrap data sync \
+            -d all -s "${SPECIES}" -ont ALL -c all \
+            --db "${db_path}" --db-only \
+            --idmaps --idmaps-level "${IDMAPS_LEVEL}"
+          /tmp/enrichgo-bootstrap db audit --db "${db_path}"
+
+          gzip -9 "${db_path}"
+
+      - name: Log optional extended artifact failure
+        if: ${{ steps.build_optional_extended.outcome == 'failure' }}
+        shell: bash
+        run: |
+          echo "[WARN] optional extended DB artifact failed; continuing release with required basic artifact only."
 
       - name: Checksums
         shell: bash
@@ -188,5 +217,6 @@ jobs:
           body: |
             Daily static builds (CGO_ENABLED=0).
             Binaries embed a CI-built default SQLite DB with fixed profile: species=hsa, idmaps_level=basic.
-            Packaged offline DB artifact is configurable by workflow inputs: `enrichgo_db_<tag>_<species>_<idmaps_level>.db.gz`.
+            Packaged offline DB always includes required `basic` artifact: `enrichgo_db_<tag>_<species>_basic.db.gz`.
+            Manual runs can optionally request an additional `extended` artifact (`idmaps_level=extended`); this step is non-blocking.
             Commit: ${{ github.sha }}

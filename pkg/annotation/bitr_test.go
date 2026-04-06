@@ -408,3 +408,48 @@ func TestConvertGeneIDFailsWhenUnconverted(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestConvertGeneIDWithPolicyThreshold(t *testing.T) {
+	genes := []string{"TP53", "EGFR"}
+	converter := mockConverter{
+		mapping: map[string][]string{
+			"TP53": {"7157"},
+			"EGFR": {"EGFR"},
+		},
+	}
+
+	_, _, report, err := ConvertGeneIDWithPolicy(genes, IDEntrez, "hsa", converter, ConversionPolicyThreshold, 0.9)
+	if err == nil {
+		t.Fatalf("expected threshold error, got nil")
+	}
+	if report == nil {
+		t.Fatalf("expected report")
+	}
+	if report.Mapped != 1 || report.Unmapped != 1 {
+		t.Fatalf("unexpected report counts: %+v", report)
+	}
+}
+
+func TestConvertGeneIDWithPolicyBestEffort(t *testing.T) {
+	genes := []string{"TP53", "EGFR"}
+	converter := mockConverter{
+		mapping: map[string][]string{
+			"TP53": {"7157"},
+			"EGFR": {"EGFR"},
+		},
+	}
+
+	converted, mapping, report, err := ConvertGeneIDWithPolicy(genes, IDEntrez, "hsa", converter, ConversionPolicyBestEffort, 0.9)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if report == nil {
+		t.Fatalf("expected report")
+	}
+	if len(converted) == 0 {
+		t.Fatalf("expected non-empty converted IDs")
+	}
+	if len(mapping) != 2 {
+		t.Fatalf("expected mapping for all genes, got %d", len(mapping))
+	}
+}

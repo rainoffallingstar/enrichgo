@@ -1,0 +1,8 @@
+{
+  "schema_version": 2,
+  "artifact": "assets/default_enrichgo.db",
+  "sha256": "041e18a482fa7c81a6e7fa90a93d9d51f141cb7bcfb2b8c93519c74a8f3d1be7",
+  "contract_profile": "embedded-hsa-seed",
+  "species": "hsa",
+  "idmaps_level": "seed"
+}

@@ -45,7 +45,8 @@ func (s *SQLiteStore) ReplaceGeneSets(ctx context.Context, f GeneSetFilter, gene
 	if f.DB == "" || f.Species == "" {
 		return fmt.Errorf("missing db/species for genesets replace")
 	}
-	if strings.TrimSpace(geneIDType) == "" {
+	geneIDType = strings.TrimSpace(geneIDType)
+	if geneIDType == "" {
 		return fmt.Errorf("empty geneIDType")
 	}
 	if version == "" {
@@ -58,53 +59,78 @@ func (s *SQLiteStore) ReplaceGeneSets(ctx context.Context, f GeneSetFilter, gene
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM geneset_gene WHERE db=? AND species=? AND ontology=? AND collection=?`,
-		f.DB, f.Species, f.Ontology, f.Collection,
-	); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM geneset WHERE db=? AND species=? AND ontology=? AND collection=?`,
-		f.DB, f.Species, f.Ontology, f.Collection,
-	); err != nil {
-		return err
-	}
-
 	now := time.Now().UTC().Format(time.RFC3339)
-	insSet, err := tx.PrepareContext(ctx, `
-		INSERT INTO geneset (db, species, ontology, collection, set_id, name, description, version, downloaded_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`)
+	datasetID, err := ensureDatasetForReplace(ctx, tx, f, geneIDType, version, now)
 	if err != nil {
 		return err
 	}
-	defer insSet.Close()
 
-	insGene, err := tx.PrepareContext(ctx, `
-		INSERT INTO geneset_gene (db, species, ontology, collection, set_id, gene_id, gene_id_type)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+	insTerm, err := tx.PrepareContext(ctx, `
+		INSERT INTO term (dataset_id, term_id, name, description)
+		VALUES (?, ?, ?, ?)
 	`)
 	if err != nil {
 		return err
 	}
-	defer insGene.Close()
+	defer insTerm.Close()
+
+	insTermGene, err := tx.PrepareContext(ctx, `
+		INSERT INTO term_gene (dataset_id, term_id, gene_pk)
+		VALUES (?, ?, ?)
+	`)
+	if err != nil {
+		return err
+	}
+	defer insTermGene.Close()
+
+	insGeneDict, err := tx.PrepareContext(ctx, `
+		INSERT OR IGNORE INTO gene_dict (gene_id)
+		VALUES (?)
+	`)
+	if err != nil {
+		return err
+	}
+	defer insGeneDict.Close()
+
+	selGenePK, err := tx.PrepareContext(ctx, `
+		SELECT gene_pk
+		FROM gene_dict
+		WHERE gene_id=?
+	`)
+	if err != nil {
+		return err
+	}
+	defer selGenePK.Close()
+
+	genePKCache := make(map[string]int64)
+	resolveGenePK := func(gene string) (int64, error) {
+		if pk, ok := genePKCache[gene]; ok {
+			return pk, nil
+		}
+		if _, err := insGeneDict.ExecContext(ctx, gene); err != nil {
+			return 0, err
+		}
+		var pk int64
+		if err := selGenePK.QueryRowContext(ctx, gene).Scan(&pk); err != nil {
+			return 0, err
+		}
+		genePKCache[gene] = pk
+		return pk, nil
+	}
 
 	for _, gs := range sets {
 		if gs == nil || strings.TrimSpace(gs.ID) == "" {
 			continue
 		}
-		name := gs.Name
-		if strings.TrimSpace(name) == "" {
+		name := strings.TrimSpace(gs.Name)
+		if name == "" {
 			name = gs.ID
 		}
 		desc := gs.Description
 		if desc == "" {
 			desc = "-"
 		}
-		if _, err := insSet.ExecContext(ctx,
-			f.DB, f.Species, f.Ontology, f.Collection, gs.ID, name, desc, version, now,
-		); err != nil {
+		if _, err := insTerm.ExecContext(ctx, datasetID, gs.ID, name, desc); err != nil {
 			return err
 		}
 		for gene := range gs.Genes {
@@ -112,15 +138,65 @@ func (s *SQLiteStore) ReplaceGeneSets(ctx context.Context, f GeneSetFilter, gene
 			if gene == "" {
 				continue
 			}
-			if _, err := insGene.ExecContext(ctx,
-				f.DB, f.Species, f.Ontology, f.Collection, gs.ID, gene, geneIDType,
-			); err != nil {
+			pk, err := resolveGenePK(gene)
+			if err != nil {
+				return err
+			}
+			if _, err := insTermGene.ExecContext(ctx, datasetID, gs.ID, pk); err != nil {
 				return err
 			}
 		}
 	}
 
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM gene_dict
+		WHERE gene_pk NOT IN (SELECT DISTINCT gene_pk FROM term_gene)
+	`); err != nil {
+		return err
+	}
+
 	return tx.Commit()
+}
+
+func ensureDatasetForReplace(ctx context.Context, tx *sql.Tx, f GeneSetFilter, geneIDType, version, now string) (int64, error) {
+	var datasetID int64
+	err := tx.QueryRowContext(ctx, `
+		SELECT id
+		FROM dataset
+		WHERE db=? AND species=? AND ontology=? AND collection=?
+	`, f.DB, f.Species, f.Ontology, f.Collection).Scan(&datasetID)
+	if err == nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM term_gene WHERE dataset_id=?`, datasetID); err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM term WHERE dataset_id=?`, datasetID); err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE dataset
+			SET gene_id_type=?, version=?, downloaded_at=?
+			WHERE id=?
+		`, geneIDType, version, now, datasetID); err != nil {
+			return 0, err
+		}
+		return datasetID, nil
+	}
+	if err != sql.ErrNoRows {
+		return 0, err
+	}
+
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO dataset (db, species, ontology, collection, gene_id_type, version, downloaded_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, f.DB, f.Species, f.Ontology, f.Collection, geneIDType, version, now)
+	if err != nil {
+		return 0, err
+	}
+	datasetID, err = res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	return datasetID, nil
 }
 
 func (s *SQLiteStore) LoadGeneSets(ctx context.Context, f GeneSetFilter) (types.GeneSets, string, error) {
@@ -132,14 +208,30 @@ func (s *SQLiteStore) LoadGeneSets(ctx context.Context, f GeneSetFilter) (types.
 		return nil, "", fmt.Errorf("missing db/species for genesets load")
 	}
 
+	var datasetID int64
+	var geneIDType string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, gene_id_type
+		FROM dataset
+		WHERE db=? AND species=? AND ontology=? AND collection=?
+	`, f.DB, f.Species, f.Ontology, f.Collection).Scan(&datasetID, &geneIDType)
+	if err == sql.ErrNoRows {
+		return types.GeneSets{}, "", nil
+	}
+	if err != nil {
+		return nil, "", err
+	}
+
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT g.set_id, g.name, g.description, gg.gene_id, gg.gene_id_type
-		FROM geneset g
-		JOIN geneset_gene gg
-		  ON g.db=gg.db AND g.species=gg.species AND g.ontology=gg.ontology AND g.collection=gg.collection AND g.set_id=gg.set_id
-		WHERE g.db=? AND g.species=? AND g.ontology=? AND g.collection=?
-		ORDER BY g.set_id
-	`, f.DB, f.Species, f.Ontology, f.Collection)
+		SELECT t.term_id, t.name, t.description, gd.gene_id
+		FROM term t
+		LEFT JOIN term_gene tg
+		  ON t.dataset_id=tg.dataset_id AND t.term_id=tg.term_id
+		LEFT JOIN gene_dict gd
+		  ON tg.gene_pk=gd.gene_pk
+		WHERE t.dataset_id=?
+		ORDER BY t.term_id
+	`, datasetID)
 	if err != nil {
 		return nil, "", err
 	}
@@ -148,10 +240,10 @@ func (s *SQLiteStore) LoadGeneSets(ctx context.Context, f GeneSetFilter) (types.
 	var sets types.GeneSets
 	var lastID string
 	var current *types.GeneSet
-	var geneIDType string
 	for rows.Next() {
-		var setID, name, desc, gene, gidType string
-		if err := rows.Scan(&setID, &name, &desc, &gene, &gidType); err != nil {
+		var setID, name, desc string
+		var gene sql.NullString
+		if err := rows.Scan(&setID, &name, &desc, &gene); err != nil {
 			return nil, "", err
 		}
 		if setID != lastID {
@@ -166,11 +258,11 @@ func (s *SQLiteStore) LoadGeneSets(ctx context.Context, f GeneSetFilter) (types.
 			}
 			lastID = setID
 		}
-		if current != nil && strings.TrimSpace(gene) != "" {
-			current.Genes[gene] = true
-		}
-		if geneIDType == "" {
-			geneIDType = gidType
+		if current != nil && gene.Valid {
+			g := strings.TrimSpace(gene.String)
+			if g != "" {
+				current.Genes[g] = true
+			}
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -181,4 +273,3 @@ func (s *SQLiteStore) LoadGeneSets(ctx context.Context, f GeneSetFilter) (types.
 	}
 	return sets, geneIDType, nil
 }
-

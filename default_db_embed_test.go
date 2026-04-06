@@ -2,11 +2,26 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 )
+
+func TestEmbeddedDefaultSQLiteManifestMatchesEmbeddedDB(t *testing.T) {
+	manifest, err := embeddedDefaultSQLiteManifest()
+	if err != nil {
+		t.Fatalf("embeddedDefaultSQLiteManifest: %v", err)
+	}
+	if manifest.SHA256 != embeddedDefaultSQLiteSHA256() {
+		t.Fatalf("manifest sha256=%s, embedded sha256=%s", manifest.SHA256, embeddedDefaultSQLiteSHA256())
+	}
+	if manifest.ContractProfile == "" {
+		t.Fatalf("manifest contract_profile should not be empty")
+	}
+}
 
 func TestEnsureEmbeddedDefaultSQLiteDBFile_InstallAndReuse(t *testing.T) {
 	if len(embeddedDefaultSQLiteDB) == 0 {
@@ -107,6 +122,24 @@ func TestEnsureEmbeddedDefaultSQLiteDBFile_UserManagedNotOverwritten(t *testing.
 	}
 }
 
+func TestFileSHA256(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a.txt")
+	data := []byte("abc")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	got, err := fileSHA256(path)
+	if err != nil {
+		t.Fatalf("fileSHA256: %v", err)
+	}
+	sum := sha256.Sum256(data)
+	want := hex.EncodeToString(sum[:])
+	if got != want {
+		t.Fatalf("sha256=%s, want %s", got, want)
+	}
+}
+
 func TestBuildDownloadUpdateArgs(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -117,17 +150,17 @@ func TestBuildDownloadUpdateArgs(t *testing.T) {
 		{
 			name: "kegg no idmaps",
 			opts: dbUpdateOptions{Database: "kegg", Species: "hsa", DBPath: "/tmp/a.db", WithIDMaps: false},
-			want: []string{"download", "-d", "kegg", "-s", "hsa", "--db", "/tmp/a.db", "--db-only", "--idmaps=false"},
+			want: []string{"data", "sync", "-d", "kegg", "-s", "hsa", "--db", "/tmp/a.db", "--db-only", "--idmaps=false"},
 		},
 		{
 			name: "go with idmaps default level",
 			opts: dbUpdateOptions{Database: "go", Species: "mmu", Ontology: "BP", DBPath: "/tmp/b.db", WithIDMaps: true},
-			want: []string{"download", "-d", "go", "-s", "mmu", "--db", "/tmp/b.db", "--db-only", "-ont", "BP", "--idmaps=true", "--idmaps-level", "basic"},
+			want: []string{"data", "sync", "-d", "go", "-s", "mmu", "--db", "/tmp/b.db", "--db-only", "-ont", "BP", "--idmaps=true", "--idmaps-level", "basic"},
 		},
 		{
 			name: "msigdb with extended idmaps",
 			opts: dbUpdateOptions{Database: "msigdb", Species: "hsa", Collection: "c2", DBPath: "/tmp/c.db", WithIDMaps: true, IDMapsLevel: "EXTENDED"},
-			want: []string{"download", "-d", "msigdb", "-s", "hsa", "--db", "/tmp/c.db", "--db-only", "-c", "c2", "--idmaps=true", "--idmaps-level", "extended"},
+			want: []string{"data", "sync", "-d", "msigdb", "-s", "hsa", "--db", "/tmp/c.db", "--db-only", "-c", "c2", "--idmaps=true", "--idmaps-level", "extended"},
 		},
 		{
 			name:    "custom not supported",

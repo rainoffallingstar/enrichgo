@@ -63,7 +63,7 @@ if [[ "$ALIGN_USE_EMBEDDED_DB" == "1" && "$ALIGN_EMBEDDED_DB_PREPARE" == "1" ]];
   fi
   if [[ "$ALIGN_FORCE_EMBEDDED_DB_REFRESH" == "1" || ! -s "$ALIGN_EMBEDDED_DB_PATH" || "$marker_level" != "$ALIGN_EMBEDDED_DB_IDMAPS_LEVEL" ]]; then
     echo "Preparing embedded runtime DB at $ALIGN_EMBEDDED_DB_PATH (idmaps_level=$ALIGN_EMBEDDED_DB_IDMAPS_LEVEL) ..."
-    ./enrichgo download -d kegg -s hsa \
+    ./enrichgo data sync -d kegg -s hsa \
       --db "$ALIGN_EMBEDDED_DB_PATH" --db-only \
       --idmaps --idmaps-level "$ALIGN_EMBEDDED_DB_IDMAPS_LEVEL"
     printf "%s\n" "$ALIGN_EMBEDDED_DB_IDMAPS_LEVEL" > "$ALIGN_EMBEDDED_DB_MARKER"
@@ -74,19 +74,19 @@ fi
 if [[ "$ALIGN_SKIP_DOWNLOAD" != "1" ]]; then
   if [[ ! -f "$DATA_DIR/hsa.gmt" ]]; then
     echo "Downloading KEGG cache into $DATA_DIR..."
-    ./enrichgo download -d kegg -s hsa -o "$DATA_DIR"
+    ./enrichgo data sync -d kegg -s hsa -o "$DATA_DIR"
   fi
   if [[ ! -f "$DATA_DIR/go_hsa_BP.gmt" ]]; then
     echo "Downloading GO(BP) cache into $DATA_DIR..."
-    ./enrichgo download -d go -s hsa -ont BP -o "$DATA_DIR"
+    ./enrichgo data sync -d go -s hsa -ont BP -o "$DATA_DIR"
   fi
   if [[ "$ALIGN_INCLUDE_REACTOME" == "1" && ! -f "$DATA_DIR/reactome_hsa.gmt" ]]; then
     echo "Downloading Reactome cache into $DATA_DIR..."
-    ./enrichgo download -d reactome -s hsa -o "$DATA_DIR"
+    ./enrichgo data sync -d reactome -s hsa -o "$DATA_DIR"
   fi
   if [[ "$ALIGN_INCLUDE_MSIGDB" == "1" ]]; then
     echo "Downloading MSigDB cache ($ALIGN_MSIGDB_COLLECTIONS) into $DATA_DIR..."
-    ./enrichgo download -d msigdb -c "$ALIGN_MSIGDB_COLLECTIONS" -o "$DATA_DIR"
+    ./enrichgo data sync -d msigdb -c "$ALIGN_MSIGDB_COLLECTIONS" -o "$DATA_DIR"
   fi
 else
   echo "ALIGN_SKIP_DOWNLOAD=1: expecting pre-cached files in $DATA_DIR"
@@ -204,35 +204,35 @@ fi
 
 # 1) Generate Go outputs (normalized settings for R alignment)
 echo "Running Go ORA/GSEA baselines..."
-./enrichgo enrich "${ALIGN_ANALYSIS_FLAGS[@]}" \
+./enrichgo analyze ora "${ALIGN_ANALYSIS_FLAGS[@]}" \
   -i "$KEGG_INPUT_CSV" -d kegg -s hsa --data-dir "$DATA_DIR" \
   --fdr-col FDR --fdr-threshold 0.05 --split-by-direction=false \
   -ont BP -o "$OUT_DIR/go_ora_kegg.tsv"
 
 if [[ -n "$GO_GMT_FILE" && -n "$GO_UNIVERSE_FILE" ]]; then
-  ./enrichgo enrich "${ALIGN_ANALYSIS_FLAGS[@]}" \
+  ./enrichgo analyze ora "${ALIGN_ANALYSIS_FLAGS[@]}" \
     -i "$INPUT_CSV" -d custom -s hsa --data-dir "$DATA_DIR" \
     --fdr-col FDR --fdr-threshold 0.05 --split-by-direction=false \
     --universe-file "$GO_UNIVERSE_FILE" -gmt "$GO_GMT_FILE" -o "$OUT_DIR/go_ora_go.tsv"
 elif [[ -n "$GO_GMT_FILE" ]]; then
-  ./enrichgo enrich "${ALIGN_ANALYSIS_FLAGS[@]}" \
+  ./enrichgo analyze ora "${ALIGN_ANALYSIS_FLAGS[@]}" \
     -i "$INPUT_CSV" -d custom -s hsa --data-dir "$DATA_DIR" \
     --fdr-col FDR --fdr-threshold 0.05 --split-by-direction=false \
     -gmt "$GO_GMT_FILE" -o "$OUT_DIR/go_ora_go.tsv"
 elif [[ -n "$GO_UNIVERSE_FILE" ]]; then
-  ./enrichgo enrich "${ALIGN_ANALYSIS_FLAGS[@]}" \
+  ./enrichgo analyze ora "${ALIGN_ANALYSIS_FLAGS[@]}" \
     -i "$INPUT_CSV" -d go -s hsa --data-dir "$DATA_DIR" \
     --fdr-col FDR --fdr-threshold 0.05 --split-by-direction=false \
     -ont BP --universe-file "$GO_UNIVERSE_FILE" -o "$OUT_DIR/go_ora_go.tsv"
 else
-  ./enrichgo enrich "${ALIGN_ANALYSIS_FLAGS[@]}" \
+  ./enrichgo analyze ora "${ALIGN_ANALYSIS_FLAGS[@]}" \
     -i "$INPUT_CSV" -d go -s hsa --data-dir "$DATA_DIR" \
     --fdr-col FDR --fdr-threshold 0.05 --split-by-direction=false \
     -ont BP -o "$OUT_DIR/go_ora_go.tsv"
 fi
 
 if [[ "$ALIGN_ONLY_ORA" != "1" ]]; then
-    ./enrichgo gsea "${ALIGN_ANALYSIS_FLAGS[@]}" \
+    ./enrichgo analyze gsea "${ALIGN_ANALYSIS_FLAGS[@]}" \
       -i "$KEGG_INPUT_CSV" -d kegg -s hsa --data-dir "$DATA_DIR" \
       -rank-col logFC -seed 42 -nPerm "$ALIGN_NPERM" -ont BP \
       -padj-cutoff "$ALIGN_GSEA_PADJ_CUTOFF" \
@@ -240,14 +240,14 @@ if [[ "$ALIGN_ONLY_ORA" != "1" ]]; then
       -o "$OUT_DIR/go_gsea_kegg.tsv"
 
   if [[ -n "$GO_GMT_FILE" ]]; then
-    ./enrichgo gsea "${ALIGN_ANALYSIS_FLAGS[@]}" \
+    ./enrichgo analyze gsea "${ALIGN_ANALYSIS_FLAGS[@]}" \
       -i "$INPUT_CSV" -d custom -gmt "$GO_GMT_FILE" -s hsa --data-dir "$DATA_DIR" \
       -rank-col logFC -seed 42 -nPerm "$ALIGN_NPERM" \
       -padj-cutoff "$ALIGN_GSEA_PADJ_CUTOFF" \
       -pvalue-method "$ALIGN_GSEA_PVALUE_METHOD" -max-perm "$ALIGN_GSEA_MAX_PERM" \
       -o "$OUT_DIR/go_gsea_go.tsv"
     if [[ "$ALIGN_DEBUG_GO_GSEA" == "1" ]]; then
-      ./enrichgo gsea "${ALIGN_ANALYSIS_FLAGS[@]}" \
+      ./enrichgo analyze gsea "${ALIGN_ANALYSIS_FLAGS[@]}" \
         -i "$INPUT_CSV" -d custom -gmt "$GO_GMT_FILE" -s hsa --data-dir "$DATA_DIR" \
         -rank-col logFC -seed 42 -nPerm "$ALIGN_NPERM" -padj-cutoff 1.0 \
         -pvalue-method "$ALIGN_GSEA_PVALUE_METHOD" -max-perm "$ALIGN_GSEA_MAX_PERM" \
@@ -255,14 +255,14 @@ if [[ "$ALIGN_ONLY_ORA" != "1" ]]; then
         -o "$OUT_DIR/go_gsea_go_unfiltered.tsv"
     fi
   else
-    ./enrichgo gsea "${ALIGN_ANALYSIS_FLAGS[@]}" \
+    ./enrichgo analyze gsea "${ALIGN_ANALYSIS_FLAGS[@]}" \
       -i "$INPUT_CSV" -d go -s hsa --data-dir "$DATA_DIR" \
       -rank-col logFC -seed 42 -nPerm "$ALIGN_NPERM" -ont BP \
       -padj-cutoff "$ALIGN_GSEA_PADJ_CUTOFF" \
       -pvalue-method "$ALIGN_GSEA_PVALUE_METHOD" -max-perm "$ALIGN_GSEA_MAX_PERM" \
       -o "$OUT_DIR/go_gsea_go.tsv"
     if [[ "$ALIGN_DEBUG_GO_GSEA" == "1" ]]; then
-      ./enrichgo gsea "${ALIGN_ANALYSIS_FLAGS[@]}" \
+      ./enrichgo analyze gsea "${ALIGN_ANALYSIS_FLAGS[@]}" \
         -i "$INPUT_CSV" -d go -s hsa --data-dir "$DATA_DIR" \
         -rank-col logFC -seed 42 -nPerm "$ALIGN_NPERM" -ont BP -padj-cutoff 1.0 \
         -pvalue-method "$ALIGN_GSEA_PVALUE_METHOD" -max-perm "$ALIGN_GSEA_MAX_PERM" \
@@ -276,14 +276,14 @@ else
 fi
 
 if [[ "$ALIGN_INCLUDE_REACTOME" == "1" ]]; then
-  ./enrichgo enrich "${ALIGN_ANALYSIS_FLAGS[@]}" \
+  ./enrichgo analyze ora "${ALIGN_ANALYSIS_FLAGS[@]}" \
     -i "$INPUT_CSV" -d custom -gmt "$REACTOME_GMT_FILE" -s hsa --data-dir "$DATA_DIR" \
     --fdr-col FDR --fdr-threshold 0.05 --split-by-direction=false \
     -o "$OUT_DIR/go_ora_reactome.tsv"
 fi
 
 if [[ "$ALIGN_INCLUDE_MSIGDB" == "1" ]]; then
-  ./enrichgo enrich "${ALIGN_ANALYSIS_FLAGS[@]}" \
+  ./enrichgo analyze ora "${ALIGN_ANALYSIS_FLAGS[@]}" \
     -i "$INPUT_CSV" -d custom -gmt "$MSIGDB_GMT_FILE" -s hsa --data-dir "$DATA_DIR" \
     --fdr-col FDR --fdr-threshold 0.05 --split-by-direction=false \
     -o "$OUT_DIR/go_ora_msigdb.tsv"
@@ -291,7 +291,7 @@ fi
 
 if [[ "$ALIGN_ONLY_ORA" != "1" ]]; then
   if [[ "$ALIGN_INCLUDE_REACTOME" == "1" ]]; then
-    ./enrichgo gsea "${ALIGN_ANALYSIS_FLAGS[@]}" \
+    ./enrichgo analyze gsea "${ALIGN_ANALYSIS_FLAGS[@]}" \
       -i "$INPUT_CSV" -d custom -gmt "$REACTOME_GMT_FILE" -s hsa --data-dir "$DATA_DIR" \
       -rank-col logFC -seed 42 -nPerm "$ALIGN_NPERM" \
       -padj-cutoff "$ALIGN_GSEA_PADJ_CUTOFF" \
@@ -299,7 +299,7 @@ if [[ "$ALIGN_ONLY_ORA" != "1" ]]; then
       -o "$OUT_DIR/go_gsea_reactome.tsv"
   fi
   if [[ "$ALIGN_INCLUDE_MSIGDB" == "1" ]]; then
-    ./enrichgo gsea "${ALIGN_ANALYSIS_FLAGS[@]}" \
+    ./enrichgo analyze gsea "${ALIGN_ANALYSIS_FLAGS[@]}" \
       -i "$INPUT_CSV" -d custom -gmt "$MSIGDB_GMT_FILE" -s hsa --data-dir "$DATA_DIR" \
       -rank-col logFC -seed 42 -nPerm "$ALIGN_NPERM" \
       -padj-cutoff "$ALIGN_GSEA_PADJ_CUTOFF" \

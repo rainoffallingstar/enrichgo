@@ -26,33 +26,36 @@ go build -o enrichgo .
 ### 2) 下载离线数据库缓存
 
 ```bash
-./enrichgo download -d kegg -s hsa -o data/
-./enrichgo download -d go -s hsa -ont BP -o data/
+./enrichgo data sync -d kegg -s hsa -o data/
+./enrichgo data sync -d go -s hsa -ont BP -o data/
 ```
 
 也可以把“通路数据库 + ID 映射”打包到单个 SQLite 文件（便于离线分发与复用）：
 
 ```bash
 # 打包所有通路库（KEGG/GO/Reactome/MSigDB）+ 离线 ID 映射到一个文件
-./enrichgo download -d all -s hsa -ont ALL -c all --db data/enrichgo.db --db-only --idmaps --idmaps-level extended
+./enrichgo data sync -d all -s hsa -ont ALL -c all --db data/enrichgo.db --db-only --idmaps --idmaps-level extended
 ```
 
 说明：
 - `--idmaps-level basic`：只用 KEGG list/link（更快、更小，但覆盖可能不如 extended）
 - `--idmaps-level extended`：使用 NCBI + UniProt 官方映射（更全，但耗时/体积更大）
+- `--idmaps-resume`：默认 `true`，extended 模式下按 source scope 跳过已完成回填，支持断点续跑
+- `--idmaps-force-refresh`：默认 `false`，开启后忽略 resume，强制全量重拉并重写各个 idmap scope
+- `--idmaps-local-dir`：basic 在线失败时，本地 `kegg_<species>_idmap.tsv` 兜底目录（默认 `data`）
 
 ### 3) 运行 ORA / GSEA
 
 ```bash
 # ORA（Go 默认实现）
-./enrichgo enrich \
+./enrichgo analyze ora \
   -i test-data/DE_results.csv \
   -d go -s hsa \
   --fdr-col FDR --fdr-threshold 0.05 --split-by-direction=false \
   -o /tmp/ora_go.tsv
 
 # GSEA（Go 默认实现）
-./enrichgo gsea \
+./enrichgo analyze gsea \
   -i test-data/DE_results.csv \
   -d kegg -s hsa \
   -rank-col logFC -nPerm 1000 \
@@ -62,27 +65,31 @@ go build -o enrichgo .
 默认发布二进制内置一个 SQLite 默认库（CI 构建 profile: `species=hsa`, `idmaps_level=basic`）。
 不传 `--db` 时会自动使用内置库落盘副本（可用 `ENRICHGO_DEFAULT_DB_PATH` 指定默认落盘路径）。
 
+内置库同时携带 `assets/default_enrichgo.db.manifest.json` 元数据（包含 `sha256` 和 `contract_profile`）；运行时会先校验 manifest 与嵌入 DB 哈希一致性。
+
 ```bash
 # 直接使用内置 SQLite（无需 --db）
-./enrichgo enrich -i test-data/DE_results.csv -d kegg -s hsa -o /tmp/ora_kegg.tsv
-./enrichgo gsea   -i test-data/DE_results.csv -d go   -s hsa -o /tmp/gsea_go.tsv
+./enrichgo analyze ora -i test-data/DE_results.csv -d kegg -s hsa -o /tmp/ora_kegg.tsv
+./enrichgo analyze gsea   -i test-data/DE_results.csv -d go   -s hsa -o /tmp/gsea_go.tsv
 ```
 
 如果要显式指定 DB 文件，继续使用 `--db`：
 
 ```bash
-./enrichgo enrich -i test-data/DE_results.csv -d kegg -s hsa --db data/enrichgo.db -o /tmp/ora_kegg.tsv
-./enrichgo gsea   -i test-data/DE_results.csv -d go   -s hsa --db data/enrichgo.db -o /tmp/gsea_go.tsv
+./enrichgo analyze ora -i test-data/DE_results.csv -d kegg -s hsa --db data/enrichgo.db -o /tmp/ora_kegg.tsv
+./enrichgo analyze gsea   -i test-data/DE_results.csv -d go   -s hsa --db data/enrichgo.db -o /tmp/gsea_go.tsv
 ```
 
 如需在分析前刷新 SQLite 数据，可开启更新：
 
 ```bash
-./enrichgo enrich -i test-data/DE_results.csv -d kegg -s hsa --update-db -o /tmp/ora_kegg.tsv
-./enrichgo gsea -i test-data/DE_results.csv -d go -s hsa --update-db --update-db-idmaps --update-db-idmaps-level basic -o /tmp/gsea_go.tsv
+./enrichgo analyze ora -i test-data/DE_results.csv -d kegg -s hsa --update-db -o /tmp/ora_kegg.tsv
+./enrichgo analyze gsea -i test-data/DE_results.csv -d go -s hsa --update-db --update-db-idmaps=true --update-db-idmaps-level basic -o /tmp/gsea_go.tsv
 ```
 
 说明：
+- 默认会自动检测运行时 SQLite 覆盖是否不足并自动扩容（`--auto-update-db=true`）
+- 可通过 `--auto-update-db=false` 显式关闭自动扩容
 - `--update-db` 不支持 `-d custom`
 - `--update-db` 成功后，该 DB 会标记为用户管理，后续不会被内置默认库自动覆盖
 
@@ -91,19 +98,19 @@ go build -o enrichgo .
 ### 默认 Go 实现
 
 ```bash
-./enrichgo gsea -i test-data/DE_results.csv -d go -s hsa -rank-col logFC -o /tmp/go.tsv
+./enrichgo analyze gsea -i test-data/DE_results.csv -d go -s hsa -rank-col logFC -o /tmp/go.tsv
 ```
 
 ### 使用 R 基线实现（clusterProfiler）
 
 ```bash
-./enrichgo gsea -i test-data/DE_results.csv -d go -s hsa -rank-col logFC --use-r -o /tmp/r.tsv
+./enrichgo analyze gsea -i test-data/DE_results.csv -d go -s hsa -rank-col logFC --use-r -o /tmp/r.tsv
 ```
 
 ### 同时运行 Go + R 并输出 benchmark
 
 ```bash
-./enrichgo gsea \
+./enrichgo analyze gsea \
   -i test-data/DE_results.csv \
   -d kegg -s hsa \
   -rank-col logFC -nPerm 100 \
@@ -137,8 +144,18 @@ benchmark 输出示例列：
   - `--data-dir` 缓存目录（默认 `data`）
   - `--db` 指定 SQLite 离线包
   - `--use-embedded-db` 未提供 `--db` 时是否使用内置默认 SQLite（默认 `true`）
+  - `--auto-update-db` 自动检测并扩容运行时 SQLite 覆盖（默认 `true`，可设为 `false` 关闭）
+  - `--strict-mode` 一键切回严格策略（关闭自动扩容/在线回退/原始ID兜底，并将转换策略恢复到 threshold >= 0.90）
   - `--update-db` 分析前先更新目标 SQLite
-  - `--update-db-idmaps` / `--update-db-idmaps-level` 控制更新时 ID 映射刷新
+  - `--update-db-idmaps` / `--update-db-idmaps-level` 控制更新时 ID 映射刷新（默认会刷新，`--update-db-idmaps=true`）
+  - `--id-conversion-policy`（`strict` / `threshold` / `best-effort`，默认 `best-effort`）
+  - `--min-conversion-rate`（threshold 策略最小转换率，默认 `0.50`）
+  - `--enable-online-idmap-fallback` 缺少离线映射时允许在线回退（默认 `true`）
+  - `--allow-id-fallback` 转换不完整时继续使用原始 ID（默认 `true`）
+- db-audit：
+  - `--profile` / `--strict-contract` 启用数据契约检查
+  - `--expect-sha256` 校验目标 DB 文件哈希
+  - `--expect-embedded-manifest` 读取内置 manifest 的 `sha256` + `contract_profile` 进行一致性校验
 - GSEA：
   - `-rank-col` 排名列（默认 `logFC`）
   - `-nPerm` 置换次数（默认 `1000`）

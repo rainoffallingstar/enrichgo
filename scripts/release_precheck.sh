@@ -9,6 +9,22 @@ DB_PATH="${RELEASE_PRECHECK_DB:-/tmp/enrichgo_release.db}"
 OUT_DIR="${RELEASE_PRECHECK_OUT:-/tmp/enrichgo_release}"
 NPERM="${RELEASE_PRECHECK_NPERM:-200}"
 SKIP_SYNC="${RELEASE_PRECHECK_SKIP_SYNC:-0}"
+IDMAPS_LEVEL="${RELEASE_PRECHECK_IDMAPS_LEVEL:-basic}"
+IDMAPS_RESUME="${RELEASE_PRECHECK_IDMAPS_RESUME:-1}"
+IDMAPS_FORCE_REFRESH="${RELEASE_PRECHECK_IDMAPS_FORCE_REFRESH:-0}"
+
+if [[ "$IDMAPS_LEVEL" != "basic" && "$IDMAPS_LEVEL" != "extended" ]]; then
+  echo "[ERROR] RELEASE_PRECHECK_IDMAPS_LEVEL must be basic or extended (got: $IDMAPS_LEVEL)" >&2
+  exit 1
+fi
+if [[ "$IDMAPS_RESUME" != "0" && "$IDMAPS_RESUME" != "1" ]]; then
+  echo "[ERROR] RELEASE_PRECHECK_IDMAPS_RESUME must be 0 or 1 (got: $IDMAPS_RESUME)" >&2
+  exit 1
+fi
+if [[ "$IDMAPS_FORCE_REFRESH" != "0" && "$IDMAPS_FORCE_REFRESH" != "1" ]]; then
+  echo "[ERROR] RELEASE_PRECHECK_IDMAPS_FORCE_REFRESH must be 0 or 1 (got: $IDMAPS_FORCE_REFRESH)" >&2
+  exit 1
+fi
 
 if [[ ! -f "$INPUT_CSV" ]]; then
   echo "[ERROR] input file not found: $INPUT_CSV" >&2
@@ -22,6 +38,7 @@ echo "[PRECHECK] input=$INPUT_CSV"
 echo "[PRECHECK] db=$DB_PATH"
 echo "[PRECHECK] out=$OUT_DIR"
 echo "[PRECHECK] nperm=$NPERM skip_sync=$SKIP_SYNC"
+echo "[PRECHECK] idmaps_level=$IDMAPS_LEVEL resume=$IDMAPS_RESUME force_refresh=$IDMAPS_FORCE_REFRESH"
 
 echo "[STEP] go test ./..."
 go test ./...
@@ -42,8 +59,23 @@ echo "[STEP] embedded manifest audit"
 ./enrichgo db audit --db assets/default_enrichgo.db --expect-embedded-manifest --strict-contract=true
 
 if [[ "$SKIP_SYNC" != "1" ]]; then
-  echo "[STEP] sync full release DB (all/hsa, extended idmaps)"
-  ./enrichgo data sync -d all -s hsa -ont ALL -c all --db "$DB_PATH" --db-only --idmaps --idmaps-level extended
+  echo "[STEP] sync full release DB (all/hsa, idmaps=$IDMAPS_LEVEL)"
+  if [[ -f "$DB_PATH" ]]; then
+    echo "[STEP] remove stale DB before sync: $DB_PATH"
+    rm -f "$DB_PATH"
+  fi
+  idmaps_args=(--idmaps --idmaps-level "$IDMAPS_LEVEL")
+  if [[ "$IDMAPS_LEVEL" == "extended" ]]; then
+    if [[ "$IDMAPS_RESUME" == "1" ]]; then
+      idmaps_args+=(--idmaps-resume=true)
+    else
+      idmaps_args+=(--idmaps-resume=false)
+    fi
+    if [[ "$IDMAPS_FORCE_REFRESH" == "1" ]]; then
+      idmaps_args+=(--idmaps-force-refresh)
+    fi
+  fi
+  ./enrichgo data sync -d all -s hsa -ont ALL -c all --db "$DB_PATH" --db-only "${idmaps_args[@]}"
 else
   echo "[STEP] skip db sync (RELEASE_PRECHECK_SKIP_SYNC=1)"
   if [[ ! -s "$DB_PATH" ]]; then

@@ -1,15 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 const (
@@ -22,9 +26,84 @@ var sha256HexPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 //go:embed assets/default_enrichgo.db
 var embeddedDefaultSQLiteDB []byte
 
+//go:embed assets/default_enrichgo.db.manifest.json
+var embeddedDefaultSQLiteManifestJSON []byte
+
+type embeddedSQLiteManifest struct {
+	SchemaVersion   int    `json:"schema_version"`
+	Artifact        string `json:"artifact"`
+	SHA256          string `json:"sha256"`
+	ContractProfile string `json:"contract_profile"`
+	Species         string `json:"species"`
+	IDMapsLevel     string `json:"idmaps_level"`
+}
+
+var (
+	embeddedManifestOnce sync.Once
+	embeddedManifest     *embeddedSQLiteManifest
+	embeddedManifestErr  error
+)
+
 func embeddedDefaultSQLiteSHA256() string {
 	sum := sha256.Sum256(embeddedDefaultSQLiteDB)
 	return hex.EncodeToString(sum[:])
+}
+
+func embeddedDefaultSQLiteManifest() (*embeddedSQLiteManifest, error) {
+	embeddedManifestOnce.Do(func() {
+		raw := bytes.TrimSpace(embeddedDefaultSQLiteManifestJSON)
+		if len(raw) == 0 {
+			embeddedManifestErr = fmt.Errorf("embedded manifest is empty")
+			return
+		}
+		var m embeddedSQLiteManifest
+		if err := json.Unmarshal(raw, &m); err != nil {
+			embeddedManifestErr = fmt.Errorf("decode embedded manifest: %w", err)
+			return
+		}
+		m.SHA256 = strings.ToLower(strings.TrimSpace(m.SHA256))
+		if !sha256HexPattern.MatchString(m.SHA256) {
+			embeddedManifestErr = fmt.Errorf("invalid manifest sha256 %q", m.SHA256)
+			return
+		}
+		m.ContractProfile = strings.TrimSpace(m.ContractProfile)
+		if m.ContractProfile == "" {
+			embeddedManifestErr = fmt.Errorf("manifest contract_profile is empty")
+			return
+		}
+		embeddedManifest = &m
+	})
+	if embeddedManifestErr != nil {
+		return nil, embeddedManifestErr
+	}
+	out := *embeddedManifest
+	return &out, nil
+}
+
+func verifyEmbeddedDefaultSQLiteContract() error {
+	m, err := embeddedDefaultSQLiteManifest()
+	if err != nil {
+		return err
+	}
+	embeddedSHA := embeddedDefaultSQLiteSHA256()
+	if m.SHA256 != embeddedSHA {
+		return fmt.Errorf("embedded db sha256 %s does not match manifest %s", embeddedSHA, m.SHA256)
+	}
+	return nil
+}
+
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("open file for sha256: %w", err)
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", fmt.Errorf("stream file for sha256: %w", err)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func defaultSQLiteRuntimePath() (string, error) {
@@ -76,6 +155,9 @@ func ensureEmbeddedDefaultSQLiteDBFile() (string, error) {
 	if len(embeddedDefaultSQLiteDB) == 0 {
 		return "", fmt.Errorf("embedded default sqlite db is empty")
 	}
+	if err := verifyEmbeddedDefaultSQLiteContract(); err != nil {
+		return "", fmt.Errorf("verify embedded sqlite manifest: %w", err)
+	}
 
 	path, err := defaultSQLiteRuntimePath()
 	if err != nil {
@@ -95,7 +177,10 @@ func ensureEmbeddedDefaultSQLiteDBFile() (string, error) {
 				return path, nil
 			}
 			if existingState == embeddedSHA {
-				return path, nil
+				fileSHA, shaErr := fileSHA256(path)
+				if shaErr == nil && fileSHA == embeddedSHA {
+					return path, nil
+				}
 			}
 		}
 	} else if !os.IsNotExist(err) {
@@ -109,6 +194,14 @@ func ensureEmbeddedDefaultSQLiteDBFile() (string, error) {
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return "", fmt.Errorf("install embedded sqlite file: %w", err)
+	}
+	writtenSHA, err := fileSHA256(path)
+	if err != nil {
+		return "", fmt.Errorf("verify installed embedded sqlite file: %w", err)
+	}
+	if writtenSHA != embeddedSHA {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("installed embedded sqlite sha256 %s does not match expected %s", writtenSHA, embeddedSHA)
 	}
 	writeEmbeddedSQLiteState(path, embeddedSHA)
 	return path, nil
@@ -159,7 +252,7 @@ func buildDownloadUpdateArgs(opts dbUpdateOptions) ([]string, error) {
 		return nil, fmt.Errorf("empty database for update")
 	}
 
-	args := []string{"download", "-d", database, "-s", strings.TrimSpace(opts.Species), "--db", dbPath, "--db-only"}
+	args := []string{"data", "sync", "-d", database, "-s", strings.TrimSpace(opts.Species), "--db", dbPath, "--db-only"}
 	if database == "go" {
 		args = append(args, "-ont", strings.TrimSpace(opts.Ontology))
 	}

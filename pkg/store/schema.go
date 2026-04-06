@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	CurrentSchemaVersion = 1
+	CurrentSchemaVersion = 2
 	schemaVersionKey     = "schema_version"
 )
 
@@ -43,76 +43,96 @@ type indexDefinitionInfo struct {
 	Unique  bool
 }
 
-var schemaV1CoreTableOrder = []string{"geneset", "geneset_gene", "idmap"}
+var schemaV2CoreTableOrder = []string{"dataset", "term", "gene_dict", "term_gene", "idmap_canon"}
 
-var schemaV1CoreTableSpecs = map[string]map[string]columnSpec{
-	"geneset": {
-		"db":            {Type: "TEXT", NotNull: true, PKPos: 1},
-		"species":       {Type: "TEXT", NotNull: true, PKPos: 2},
-		"ontology":      {Type: "TEXT", NotNull: true, PKPos: 3},
-		"collection":    {Type: "TEXT", NotNull: true, PKPos: 4},
-		"set_id":        {Type: "TEXT", NotNull: true, PKPos: 5},
-		"name":          {Type: "TEXT", NotNull: true, PKPos: 0},
-		"description":   {Type: "TEXT", NotNull: true, PKPos: 0},
+var schemaV2CoreTableSpecs = map[string]map[string]columnSpec{
+	"dataset": {
+		"id":            {Type: "INTEGER", NotNull: true, PKPos: 1},
+		"db":            {Type: "TEXT", NotNull: true, PKPos: 0},
+		"species":       {Type: "TEXT", NotNull: true, PKPos: 0},
+		"ontology":      {Type: "TEXT", NotNull: true, PKPos: 0},
+		"collection":    {Type: "TEXT", NotNull: true, PKPos: 0},
+		"gene_id_type":  {Type: "TEXT", NotNull: true, PKPos: 0},
 		"version":       {Type: "TEXT", NotNull: true, PKPos: 0},
 		"downloaded_at": {Type: "TEXT", NotNull: true, PKPos: 0},
 	},
-	"geneset_gene": {
-		"db":           {Type: "TEXT", NotNull: true, PKPos: 1},
-		"species":      {Type: "TEXT", NotNull: true, PKPos: 2},
-		"ontology":     {Type: "TEXT", NotNull: true, PKPos: 3},
-		"collection":   {Type: "TEXT", NotNull: true, PKPos: 4},
-		"set_id":       {Type: "TEXT", NotNull: true, PKPos: 5},
-		"gene_id":      {Type: "TEXT", NotNull: true, PKPos: 6},
-		"gene_id_type": {Type: "TEXT", NotNull: true, PKPos: 7},
+	"term": {
+		"dataset_id":  {Type: "INTEGER", NotNull: true, PKPos: 1},
+		"term_id":     {Type: "TEXT", NotNull: true, PKPos: 2},
+		"name":        {Type: "TEXT", NotNull: true, PKPos: 0},
+		"description": {Type: "TEXT", NotNull: true, PKPos: 0},
 	},
-	"idmap": {
+	"gene_dict": {
+		"gene_pk": {Type: "INTEGER", NotNull: true, PKPos: 1},
+		"gene_id": {Type: "TEXT", NotNull: true, PKPos: 0},
+	},
+	"term_gene": {
+		"dataset_id": {Type: "INTEGER", NotNull: true, PKPos: 1},
+		"term_id":    {Type: "TEXT", NotNull: true, PKPos: 2},
+		"gene_pk":    {Type: "INTEGER", NotNull: true, PKPos: 3},
+	},
+	"idmap_canon": {
 		"species":       {Type: "TEXT", NotNull: true, PKPos: 1},
 		"from_type":     {Type: "TEXT", NotNull: true, PKPos: 2},
 		"from_id":       {Type: "TEXT", NotNull: true, PKPos: 3},
-		"to_type":       {Type: "TEXT", NotNull: true, PKPos: 4},
-		"to_id":         {Type: "TEXT", NotNull: true, PKPos: 5},
-		"source":        {Type: "TEXT", NotNull: true, PKPos: 6},
+		"entrez_id":     {Type: "TEXT", NotNull: true, PKPos: 4},
+		"source":        {Type: "TEXT", NotNull: true, PKPos: 5},
 		"downloaded_at": {Type: "TEXT", NotNull: true, PKPos: 0},
 	},
 }
 
-var schemaV1MetaTableOrder = []string{"meta"}
+var schemaV2MetaTableOrder = []string{"meta"}
 
-var schemaV1MetaTableSpecs = map[string]map[string]columnSpec{
+var schemaV2MetaTableSpecs = map[string]map[string]columnSpec{
 	"meta": {
 		"key":   {Type: "TEXT", NotNull: true, PKPos: 1},
 		"value": {Type: "TEXT", NotNull: true, PKPos: 0},
 	},
 }
 
-var schemaV1IndexOrder = []string{
-	"idx_geneset_gene_lookup",
-	"idx_geneset_gene_by_gene",
-	"idx_idmap_lookup",
+var schemaV2IndexOrder = []string{
+	"idx_dataset_lookup",
+	"idx_term_gene_by_term",
+	"idx_term_gene_by_gene",
+	"idx_idmap_canon_forward",
+	"idx_idmap_canon_reverse",
 }
 
-var schemaV1IndexSpecs = map[string]indexSpec{
-	"idx_geneset_gene_lookup": {
-		Table:   "geneset_gene",
-		Columns: []string{"db", "species", "ontology", "collection", "set_id"},
-		Unique:  false,
-		CreateSQL: `CREATE INDEX IF NOT EXISTS idx_geneset_gene_lookup
-			ON geneset_gene (db, species, ontology, collection, set_id);`,
+var schemaV2IndexSpecs = map[string]indexSpec{
+	"idx_dataset_lookup": {
+		Table:   "dataset",
+		Columns: []string{"db", "species", "ontology", "collection"},
+		Unique:  true,
+		CreateSQL: `CREATE UNIQUE INDEX IF NOT EXISTS idx_dataset_lookup
+			ON dataset (db, species, ontology, collection);`,
 	},
-	"idx_geneset_gene_by_gene": {
-		Table:   "geneset_gene",
-		Columns: []string{"db", "species", "ontology", "collection", "gene_id", "gene_id_type"},
+	"idx_term_gene_by_term": {
+		Table:   "term_gene",
+		Columns: []string{"dataset_id", "term_id"},
 		Unique:  false,
-		CreateSQL: `CREATE INDEX IF NOT EXISTS idx_geneset_gene_by_gene
-			ON geneset_gene (db, species, ontology, collection, gene_id, gene_id_type);`,
+		CreateSQL: `CREATE INDEX IF NOT EXISTS idx_term_gene_by_term
+			ON term_gene (dataset_id, term_id);`,
 	},
-	"idx_idmap_lookup": {
-		Table:   "idmap",
-		Columns: []string{"species", "from_type", "to_type", "from_id"},
+	"idx_term_gene_by_gene": {
+		Table:   "term_gene",
+		Columns: []string{"dataset_id", "gene_pk"},
 		Unique:  false,
-		CreateSQL: `CREATE INDEX IF NOT EXISTS idx_idmap_lookup
-			ON idmap (species, from_type, to_type, from_id);`,
+		CreateSQL: `CREATE INDEX IF NOT EXISTS idx_term_gene_by_gene
+			ON term_gene (dataset_id, gene_pk);`,
+	},
+	"idx_idmap_canon_forward": {
+		Table:   "idmap_canon",
+		Columns: []string{"species", "from_type", "from_id"},
+		Unique:  false,
+		CreateSQL: `CREATE INDEX IF NOT EXISTS idx_idmap_canon_forward
+			ON idmap_canon (species, from_type, from_id);`,
+	},
+	"idx_idmap_canon_reverse": {
+		Table:   "idmap_canon",
+		Columns: []string{"species", "from_type", "entrez_id"},
+		Unique:  false,
+		CreateSQL: `CREATE INDEX IF NOT EXISTS idx_idmap_canon_reverse
+			ON idmap_canon (species, from_type, entrez_id);`,
 	},
 }
 
@@ -120,41 +140,50 @@ var schemaMigrations = []schemaMigration{
 	{
 		version: CurrentSchemaVersion,
 		statements: []string{
-			`CREATE TABLE IF NOT EXISTS geneset (
+			`CREATE TABLE IF NOT EXISTS dataset (
+				id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
 				db TEXT NOT NULL,
 				species TEXT NOT NULL,
 				ontology TEXT NOT NULL,
 				collection TEXT NOT NULL,
-				set_id TEXT NOT NULL,
+				gene_id_type TEXT NOT NULL,
+				version TEXT NOT NULL,
+				downloaded_at TEXT NOT NULL
+			);`,
+			`CREATE TABLE IF NOT EXISTS term (
+				dataset_id INTEGER NOT NULL,
+				term_id TEXT NOT NULL,
 				name TEXT NOT NULL,
 				description TEXT NOT NULL,
-				version TEXT NOT NULL,
-				downloaded_at TEXT NOT NULL,
-				PRIMARY KEY (db, species, ontology, collection, set_id)
+				PRIMARY KEY (dataset_id, term_id),
+				FOREIGN KEY (dataset_id) REFERENCES dataset(id) ON DELETE CASCADE
 			);`,
-			`CREATE TABLE IF NOT EXISTS geneset_gene (
-				db TEXT NOT NULL,
-				species TEXT NOT NULL,
-				ontology TEXT NOT NULL,
-				collection TEXT NOT NULL,
-				set_id TEXT NOT NULL,
-				gene_id TEXT NOT NULL,
-				gene_id_type TEXT NOT NULL,
-				PRIMARY KEY (db, species, ontology, collection, set_id, gene_id, gene_id_type)
+			`CREATE TABLE IF NOT EXISTS gene_dict (
+				gene_pk INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+				gene_id TEXT NOT NULL UNIQUE
 			);`,
-			schemaV1IndexSpecs["idx_geneset_gene_lookup"].CreateSQL,
-			schemaV1IndexSpecs["idx_geneset_gene_by_gene"].CreateSQL,
-			`CREATE TABLE IF NOT EXISTS idmap (
+			`CREATE TABLE IF NOT EXISTS term_gene (
+				dataset_id INTEGER NOT NULL,
+				term_id TEXT NOT NULL,
+				gene_pk INTEGER NOT NULL,
+				PRIMARY KEY (dataset_id, term_id, gene_pk),
+				FOREIGN KEY (dataset_id, term_id) REFERENCES term(dataset_id, term_id) ON DELETE CASCADE,
+				FOREIGN KEY (gene_pk) REFERENCES gene_dict(gene_pk) ON DELETE CASCADE
+			);`,
+			`CREATE TABLE IF NOT EXISTS idmap_canon (
 				species TEXT NOT NULL,
 				from_type TEXT NOT NULL,
 				from_id TEXT NOT NULL,
-				to_type TEXT NOT NULL,
-				to_id TEXT NOT NULL,
+				entrez_id TEXT NOT NULL,
 				source TEXT NOT NULL,
 				downloaded_at TEXT NOT NULL,
-				PRIMARY KEY (species, from_type, from_id, to_type, to_id, source)
+				PRIMARY KEY (species, from_type, from_id, entrez_id, source)
 			);`,
-			schemaV1IndexSpecs["idx_idmap_lookup"].CreateSQL,
+			schemaV2IndexSpecs["idx_dataset_lookup"].CreateSQL,
+			schemaV2IndexSpecs["idx_term_gene_by_term"].CreateSQL,
+			schemaV2IndexSpecs["idx_term_gene_by_gene"].CreateSQL,
+			schemaV2IndexSpecs["idx_idmap_canon_forward"].CreateSQL,
+			schemaV2IndexSpecs["idx_idmap_canon_reverse"].CreateSQL,
 		},
 	},
 }
@@ -167,37 +196,39 @@ func applySchema(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 
-	version, ok, err := readSchemaVersion(ctx, db)
+	version, hasVersion, err := readSchemaVersion(ctx, db)
 	if err != nil {
 		return err
 	}
-	if ok {
+
+	if hasVersion {
 		if version < 0 {
 			return fmt.Errorf("invalid schema version %d", version)
 		}
 		if version > CurrentSchemaVersion {
 			return fmt.Errorf("db schema version %d is newer than supported %d", version, CurrentSchemaVersion)
 		}
-		// Allow missing secondary indexes on existing DBs; they are repaired below.
-		if err := validateSchemaForVersion(ctx, db, version, false); err != nil {
+		if version < CurrentSchemaVersion {
+			return fmt.Errorf("db schema version %d is no longer supported; rebuild database with enrichgo data sync", version)
+		}
+		if err := ensureSchemaIndexes(ctx, db, version); err != nil {
 			return err
 		}
-		if version == 1 {
-			if err := validateSchemaV1MetaTable(ctx, db); err != nil {
-				return err
-			}
-		}
-	} else {
-		if _, err := detectCompatibleLegacySchema(ctx, db); err != nil {
+		if err := validateSchemaForVersion(ctx, db, version, true); err != nil {
 			return err
 		}
-		version = 0
+		return nil
+	}
+
+	hasUserTables, err := hasUnversionedUserTables(ctx, db)
+	if err != nil {
+		return err
+	}
+	if hasUserTables {
+		return fmt.Errorf("unversioned sqlite schema is unsupported; rebuild database with enrichgo data sync")
 	}
 
 	for _, migration := range schemaMigrations {
-		if migration.version <= version {
-			continue
-		}
 		for _, stmt := range migration.statements {
 			if _, err := db.ExecContext(ctx, stmt); err != nil {
 				return fmt.Errorf("apply schema v%d: %w", migration.version, err)
@@ -206,24 +237,36 @@ func applySchema(ctx context.Context, db *sql.DB) error {
 		if err := writeSchemaVersion(ctx, db, migration.version); err != nil {
 			return err
 		}
-		version = migration.version
 	}
 
-	if err := ensureSchemaIndexes(ctx, db, version); err != nil {
+	if err := ensureSchemaIndexes(ctx, db, CurrentSchemaVersion); err != nil {
 		return err
 	}
-	if err := validateSchemaForVersion(ctx, db, version, true); err != nil {
+	if err := validateSchemaForVersion(ctx, db, CurrentSchemaVersion, true); err != nil {
 		return err
 	}
 	return nil
 }
 
+func hasUnversionedUserTables(ctx context.Context, db *sql.DB) (bool, error) {
+	var n int
+	err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM sqlite_master
+		WHERE type='table'
+		  AND name NOT LIKE 'sqlite_%'
+		  AND name <> 'meta'
+	`).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("check unversioned tables: %w", err)
+	}
+	return n > 0, nil
+}
+
 func ensureSchemaIndexes(ctx context.Context, db *sql.DB, version int) error {
 	switch version {
-	case 0:
-		return nil
-	case 1:
-		return ensureIndexes(ctx, db, schemaV1IndexOrder, schemaV1IndexSpecs)
+	case 2:
+		return ensureIndexes(ctx, db, schemaV2IndexOrder, schemaV2IndexSpecs)
 	default:
 		return fmt.Errorf("unsupported schema version %d", version)
 	}
@@ -267,31 +310,6 @@ func writeSchemaVersion(ctx context.Context, db *sql.DB, version int) error {
 	return nil
 }
 
-func detectCompatibleLegacySchema(ctx context.Context, db *sql.DB) (bool, error) {
-	required := schemaV1CoreTableOrder
-	present := make([]string, 0, len(required))
-	for _, name := range required {
-		exists, err := tableExists(ctx, db, name)
-		if err != nil {
-			return false, err
-		}
-		if exists {
-			present = append(present, name)
-		}
-	}
-
-	if len(present) == 0 {
-		return false, nil
-	}
-	if len(present) != len(required) {
-		return false, fmt.Errorf("legacy schema is incompatible: partial tables present (%s)", strings.Join(present, ","))
-	}
-	if err := validateSchemaForVersion(ctx, db, CurrentSchemaVersion, false); err != nil {
-		return false, fmt.Errorf("legacy schema is incompatible: %w", err)
-	}
-	return true, nil
-}
-
 func tableExists(ctx context.Context, db *sql.DB, name string) (bool, error) {
 	var exists int
 	err := db.QueryRowContext(ctx, `
@@ -310,41 +328,39 @@ func tableExists(ctx context.Context, db *sql.DB, name string) (bool, error) {
 
 func validateSchemaForVersion(ctx context.Context, db *sql.DB, version int, strict bool) error {
 	switch version {
-	case 0:
-		return nil
-	case 1:
-		return validateSchemaV1(ctx, db, strict)
+	case 2:
+		return validateSchemaV2(ctx, db, strict)
 	default:
 		return fmt.Errorf("unsupported schema version %d", version)
 	}
 }
 
-func validateSchemaV1(ctx context.Context, db *sql.DB, strict bool) error {
-	if err := validateSchemaV1CoreTables(ctx, db); err != nil {
+func validateSchemaV2(ctx context.Context, db *sql.DB, strict bool) error {
+	if err := validateSchemaV2CoreTables(ctx, db); err != nil {
 		return err
 	}
 	if !strict {
 		return nil
 	}
-	if err := validateSchemaV1MetaTable(ctx, db); err != nil {
+	if err := validateSchemaV2MetaTable(ctx, db); err != nil {
 		return err
 	}
-	if err := validateSchemaV1Indexes(ctx, db); err != nil {
+	if err := validateSchemaV2Indexes(ctx, db); err != nil {
 		return err
 	}
 	return nil
 }
 
-func validateSchemaV1CoreTables(ctx context.Context, db *sql.DB) error {
-	return validateTableSpecs(ctx, db, schemaV1CoreTableOrder, schemaV1CoreTableSpecs)
+func validateSchemaV2CoreTables(ctx context.Context, db *sql.DB) error {
+	return validateTableSpecs(ctx, db, schemaV2CoreTableOrder, schemaV2CoreTableSpecs)
 }
 
-func validateSchemaV1MetaTable(ctx context.Context, db *sql.DB) error {
-	return validateTableSpecs(ctx, db, schemaV1MetaTableOrder, schemaV1MetaTableSpecs)
+func validateSchemaV2MetaTable(ctx context.Context, db *sql.DB) error {
+	return validateTableSpecs(ctx, db, schemaV2MetaTableOrder, schemaV2MetaTableSpecs)
 }
 
-func validateSchemaV1Indexes(ctx context.Context, db *sql.DB) error {
-	return validateIndexes(ctx, db, schemaV1IndexOrder, schemaV1IndexSpecs)
+func validateSchemaV2Indexes(ctx context.Context, db *sql.DB) error {
+	return validateIndexes(ctx, db, schemaV2IndexOrder, schemaV2IndexSpecs)
 }
 
 func validateTableSpecs(ctx context.Context, db *sql.DB, tableOrder []string, specs map[string]map[string]columnSpec) error {

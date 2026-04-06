@@ -52,12 +52,25 @@ jobs:
           mkdir -p assets
 
           CGO_ENABLED=0 go build -o /tmp/enrichgo-bootstrap .
-          /tmp/enrichgo-bootstrap download \
+          /tmp/enrichgo-bootstrap data sync \
             -d kegg -s "${EMBED_SPECIES}" \
             --db "assets/default_enrichgo.db" --db-only \
-            --idmaps --idmaps-level "${EMBED_IDMAPS_LEVEL}"
+            --idmaps --idmaps-level "${EMBED_IDMAPS_LEVEL}" --idmaps-force-refresh
 
-          audit_output="$(/tmp/enrichgo-bootstrap db-audit --db "assets/default_enrichgo.db")"
+          db_sha="$(sha256sum assets/default_enrichgo.db | awk '{print $1}')"
+          manifest_profile="embedded-${EMBED_SPECIES}-${EMBED_IDMAPS_LEVEL}"
+          cat > assets/default_enrichgo.db.manifest.json <<MANIFEST
+          {
+            "schema_version": 2,
+            "artifact": "assets/default_enrichgo.db",
+            "sha256": "${db_sha}",
+            "contract_profile": "${manifest_profile}",
+            "species": "${EMBED_SPECIES}",
+            "idmaps_level": "${EMBED_IDMAPS_LEVEL}"
+          }
+          MANIFEST
+
+          audit_output="$(/tmp/enrichgo-bootstrap db audit --db "assets/default_enrichgo.db" --profile "${manifest_profile}" --strict-contract=true --expect-sha256 "${db_sha}")"
           echo "$audit_output"
 
           extract_value() {
@@ -69,9 +82,15 @@ jobs:
           [[ "$(extract_value rows.geneset)" -gt 0 ]]
           [[ "$(extract_value rows.geneset_gene)" -gt 0 ]]
           [[ "$(extract_value rows.idmap)" -gt 0 ]]
+          [[ "$(extract_value sha256_match)" == "true" ]]
 
       - name: Build
         run: go build -o enrichgo .
+
+      - name: Verify embedded DB manifest contract (built binary)
+        shell: bash
+        run: |
+          ./enrichgo db audit --db "assets/default_enrichgo.db" --expect-embedded-manifest --strict-contract=true
 
       - name: Static build check (CGO_ENABLED=0)
         shell: bash
@@ -90,7 +109,7 @@ jobs:
       - name: ORA benchmark (Go vs R)
         shell: bash
         run: |
-          ./enrichgo enrich \
+          ./enrichgo analyze ora \
             -i /tmp/benchmark_input_kegg.csv \
             -d kegg -s hsa \
             --fdr-col FDR --fdr-threshold 0.05 --split-by-direction=false \
@@ -102,7 +121,7 @@ jobs:
       - name: GSEA benchmark (Go vs R)
         shell: bash
         run: |
-          ./enrichgo gsea \
+          ./enrichgo analyze gsea \
             -i /tmp/benchmark_input_kegg.csv \
             -d kegg -s hsa \
             -rank-col logFC -nPerm 50 \

@@ -140,31 +140,31 @@ type KEGGIDConverter struct {
 
 ```bash
 # 使用基因符号 (自动转换为 Entrez)
-./enrichgo enrich -i genes.txt -d kegg -s hsa
+./enrichgo analyze ora -i genes.txt -d kegg -s hsa
 
 # 指定 ID 类型
-./enrichgo enrich -i genes.txt -d kegg -s hsa -id-type symbol
+./enrichgo analyze ora -i genes.txt -d kegg -s hsa -id-type symbol
 
 # 使用自定义基因集
-./enrichgo enrich -i genes.txt -d custom -gmt my_genesets.gmt
+./enrichgo analyze ora -i genes.txt -d custom -gmt my_genesets.gmt
 ```
 
 ### GSEA 分析
 
 ```bash
 # 使用排序好的基因列表
-./enrichgo gsea -i ranked_genes.txt -d kegg -s hsa
+./enrichgo analyze gsea -i ranked_genes.txt -d kegg -s hsa
 
 # 指定随机种子
-./enrichgo gsea -i ranked_genes.txt -d kegg -s hsa -seed 42
+./enrichgo analyze gsea -i ranked_genes.txt -d kegg -s hsa -seed 42
 
 # 1000 次置换
-./enrichgo gsea -i ranked_genes.txt -d kegg -s hsa -nPerm 1000
+./enrichgo analyze gsea -i ranked_genes.txt -d kegg -s hsa -nPerm 1000
 ```
 
 ### 下载数据库
 
 ```bash
-./enrichgo download -d kegg -s hsa -o data/
-./enrichgo download -d go -s mmu -ont BP -o data/
+./enrichgo data sync -d kegg -s hsa -o data/
+./enrichgo data sync -d go -s mmu -ont BP -o data/
 ```

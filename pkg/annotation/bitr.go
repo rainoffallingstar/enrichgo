@@ -107,6 +107,7 @@ type KEGGIDConverter struct {
 	speciesMaps map[string]*speciesGeneMap
 	dataDir     string
 	maxEntries  int
+	allowOnline bool
 	hits        uint64
 	misses      uint64
 	mu          sync.RWMutex
@@ -135,6 +136,7 @@ func NewKEGGIDConverter(dataDir ...string) *KEGGIDConverter {
 		speciesMaps: make(map[string]*speciesGeneMap),
 		dataDir:     dir,
 		maxEntries:  defaultKEGGIDCacheMaxEntries,
+		allowOnline: true,
 	}
 }
 
@@ -156,6 +158,12 @@ func (c *KEGGIDConverter) SetMaxCacheEntries(max int) {
 		cc.max = max
 		cc.evictIfNeeded()
 	}
+}
+
+func (c *KEGGIDConverter) SetAllowOnlineFetch(allow bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.allowOnline = allow
 }
 
 func (c *KEGGIDConverter) Stats() KEGGIDCacheStats {
@@ -369,6 +377,10 @@ func (c *KEGGIDConverter) loadSpeciesGeneMap(species string) (*speciesGeneMap, e
 		return m, nil
 	}
 
+	if !c.allowOnline {
+		return nil, fmt.Errorf("offline ID mapping unavailable for %s: local cache not found", species)
+	}
+
 	m, err := c.fetchSpeciesGeneMapFromKEGG(species)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load ID mapping for %s: %w", species, err)
@@ -538,6 +550,9 @@ func (c *KEGGIDConverter) fetchSpeciesGeneMapFromKEGG(species string) (*speciesG
 }
 
 func (c *KEGGIDConverter) convertByKEGGConvAPI(geneIDs []string, fromType, toType IDType, species string) (map[string][]string, error) {
+	if !c.allowOnline {
+		return nil, fmt.Errorf("online KEGG conversion disabled")
+	}
 	fromStr := idTypeToKEGG(fromType)
 	toStr := idTypeToKEGG(toType)
 	url := fmt.Sprintf("https://rest.kegg.jp/conv/%s/%s/%s", toStr, species, fromStr)
@@ -601,12 +616,70 @@ func idTypeToKEGG(idType IDType) string {
 	}
 }
 
+type ConversionPolicy string
+
+const (
+	ConversionPolicyStrict     ConversionPolicy = "strict"
+	ConversionPolicyThreshold  ConversionPolicy = "threshold"
+	ConversionPolicyBestEffort ConversionPolicy = "best-effort"
+)
+
+type ConversionReport struct {
+	Total          int
+	Mapped         int
+	Unmapped       int
+	ConversionRate float64
+	InputType      IDType
+	TargetType     IDType
+	Policy         ConversionPolicy
+	LayerHits      map[string]int
+}
+
+type LayerStatsProvider interface {
+	LayerStats() map[string]int
+}
+
 // ConvertGeneID 转换基因 ID
 // 自动检测输入 ID 类型并转换为目标类型
 func ConvertGeneID(geneIDs []string, targetType IDType, species string, converter IDConverter) ([]string, map[string][]string, error) {
+	converted, mapping, _, err := ConvertGeneIDWithPolicy(
+		geneIDs,
+		targetType,
+		species,
+		converter,
+		ConversionPolicyStrict,
+		1.0,
+	)
+	return converted, mapping, err
+}
+
+func ConvertGeneIDWithPolicy(
+	geneIDs []string,
+	targetType IDType,
+	species string,
+	converter IDConverter,
+	policy ConversionPolicy,
+	minRate float64,
+) ([]string, map[string][]string, *ConversionReport, error) {
 	inputType := BatchDetectIDType(geneIDs)
 	if inputType == IDUnknown {
-		return nil, nil, fmt.Errorf("cannot detect input ID type")
+		return nil, nil, nil, fmt.Errorf("cannot detect input ID type")
+	}
+	if policy == "" {
+		policy = ConversionPolicyThreshold
+	}
+	if minRate <= 0 {
+		minRate = 0.90
+	}
+	if minRate > 1 {
+		minRate = 1
+	}
+
+	report := &ConversionReport{
+		Total:      len(geneIDs),
+		InputType:  inputType,
+		TargetType: targetType,
+		Policy:     policy,
 	}
 
 	if inputType == targetType {
@@ -614,15 +687,44 @@ func ConvertGeneID(geneIDs []string, targetType IDType, species string, converte
 		for _, id := range geneIDs {
 			result[id] = []string{id}
 		}
-		return geneIDs, result, nil
+		report.Mapped = len(geneIDs)
+		report.Unmapped = 0
+		report.ConversionRate = 1
+		return geneIDs, result, report, nil
 	}
 
 	mapping, err := converter.Convert(geneIDs, inputType, targetType, species)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, report, err
 	}
-	if err := validateConversionResult(geneIDs, mapping); err != nil {
-		return nil, nil, err
+	if provider, ok := converter.(LayerStatsProvider); ok {
+		report.LayerHits = provider.LayerStats()
+	}
+
+	report.Mapped, report.Unmapped = conversionCounts(geneIDs, mapping)
+	if report.Total > 0 {
+		report.ConversionRate = float64(report.Mapped) / float64(report.Total)
+	}
+
+	switch policy {
+	case ConversionPolicyBestEffort:
+		// keep going even when conversion is partial.
+	case ConversionPolicyThreshold:
+		if report.ConversionRate < minRate {
+			return nil, nil, report, fmt.Errorf(
+				"ID conversion rate %.4f below threshold %.4f (%d/%d mapped)",
+				report.ConversionRate,
+				minRate,
+				report.Mapped,
+				report.Total,
+			)
+		}
+	case ConversionPolicyStrict:
+		fallthrough
+	default:
+		if err := validateConversionResult(geneIDs, mapping); err != nil {
+			return nil, nil, report, err
+		}
 	}
 
 	var convertedIDs []string
@@ -630,12 +732,10 @@ func ConvertGeneID(geneIDs []string, targetType IDType, species string, converte
 		convertedIDs = append(convertedIDs, ids...)
 	}
 	convertedIDs = uniqueStrings(convertedIDs)
-
-	return convertedIDs, mapping, nil
+	return convertedIDs, mapping, report, nil
 }
 
-func validateConversionResult(geneIDs []string, mapping map[string][]string) error {
-	unmapped := 0
+func conversionCounts(geneIDs []string, mapping map[string][]string) (mapped int, unmapped int) {
 	for _, orig := range geneIDs {
 		ids, ok := mapping[orig]
 		if !ok || len(ids) == 0 {
@@ -651,8 +751,15 @@ func validateConversionResult(geneIDs []string, mapping map[string][]string) err
 		}
 		if !converted {
 			unmapped++
+			continue
 		}
+		mapped++
 	}
+	return mapped, unmapped
+}
+
+func validateConversionResult(geneIDs []string, mapping map[string][]string) error {
+	_, unmapped := conversionCounts(geneIDs, mapping)
 	if unmapped > 0 {
 		return fmt.Errorf("ID conversion incomplete: %d/%d genes were not converted", unmapped, len(geneIDs))
 	}
