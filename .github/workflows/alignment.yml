@@ -27,6 +27,14 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Install rs-reborn
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://raw.githubusercontent.com/rainoffallingstar/rs-reborn/main/install.sh | bash
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          rs version
+
       - name: Setup R
         uses: r-lib/actions/setup-r@v2
 

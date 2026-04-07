@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"os/exec"
+	"strings"
+	"testing"
+)
 
 func TestResolveRResultFile(t *testing.T) {
 	tests := []struct {
@@ -103,4 +108,40 @@ func TestNormalizeBenchmarkSubprocessArgs(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResolveRSBinary(t *testing.T) {
+	prev, had := os.LookupEnv(envRSBinary)
+	t.Cleanup(func() {
+		if had {
+			_ = os.Setenv(envRSBinary, prev)
+		} else {
+			_ = os.Unsetenv(envRSBinary)
+		}
+	})
+
+	t.Run("env override missing", func(t *testing.T) {
+		_ = os.Setenv(envRSBinary, "definitely-not-a-real-rs-binary")
+		_, err := resolveRSBinary()
+		if err == nil {
+			t.Fatal("expected error for missing override binary")
+		}
+		if !strings.Contains(err.Error(), envRSBinary) {
+			t.Fatalf("error %q does not mention %s", err, envRSBinary)
+		}
+	})
+
+	t.Run("env override valid", func(t *testing.T) {
+		if _, err := exec.LookPath("sh"); err != nil {
+			t.Skip("sh not found in PATH")
+		}
+		_ = os.Setenv(envRSBinary, "sh")
+		got, err := resolveRSBinary()
+		if err != nil {
+			t.Fatalf("resolveRSBinary with valid override returned error: %v", err)
+		}
+		if strings.TrimSpace(got) == "" {
+			t.Fatal("resolveRSBinary returned empty path")
+		}
+	})
 }

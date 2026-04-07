@@ -126,14 +126,13 @@ benchmark 输出示例列：
 - `max_rss_kb`：峰值内存（KB）
 - `output`：对应结果文件路径
 
-### R 依赖检查（自动）
+### rs-reborn 依赖检查（自动）
 
 在 `--use-r` 或 `--benchmark` 模式下，程序会先检查：
 
-- `Rscript` 是否可用
-- R 包是否存在：`clusterProfiler`、`org.Hs.eg.db`、`jsonlite`
+- `rs` 或 `rs-reborn` 是否可用（可用环境变量 `ENRICHGO_RS_BIN` 指定二进制名/路径）
 
-缺失时会直接报错退出（fail-fast）。
+R 包安装与脚本依赖解析由 `rs-reborn` 负责（按脚本依赖自动管理）。缺失时会直接报错退出（fail-fast）。
 
 ## 常用参数
 

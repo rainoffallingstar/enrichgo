@@ -345,7 +345,7 @@ ALIGN_INCLUDE_REACTOME="$ALIGN_INCLUDE_REACTOME" \
 ALIGN_INCLUDE_MSIGDB="$ALIGN_INCLUDE_MSIGDB" \
 ALIGN_R_REACTOME_GMT_FILE="$REACTOME_GMT_FILE" \
 ALIGN_R_MSIGDB_GMT_FILE="$MSIGDB_GMT_FILE" \
-Rscript "$ROOT_DIR/scripts/alignment/clusterprofiler_baseline.R" "$INPUT_CSV" "$OUT_DIR"
+"${ENRICHGO_RS_BIN:-rs}" run "$ROOT_DIR/scripts/alignment/clusterprofiler_baseline.R" "$INPUT_CSV" "$OUT_DIR"
 
 # 3) Compare & score
 echo "Comparing Go vs R outputs..."

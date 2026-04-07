@@ -42,6 +42,8 @@
 ./enrichgo data sync -d kegg -s hsa -o data/
 ```
 
+> 说明：`--use-r`/`--benchmark` 模式通过 `rs-reborn`（`rs` 或 `rs-reborn` 命令）调用 R 脚本。
+
 ### 离线优先说明
 
 - `download -d kegg` 会同时缓存通路文件和 `kegg_<species>_idmap.tsv`（ID 映射）。

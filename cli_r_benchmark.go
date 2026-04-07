@@ -44,27 +44,44 @@ type benchMetrics struct {
 	MaxRSSKB int
 }
 
-func ensureRReady() error {
-	if _, err := exec.LookPath("Rscript"); err != nil {
-		return errors.New("Rscript not found in PATH; please install R first")
-	}
+const envRSBinary = "ENRICHGO_RS_BIN"
 
-	checkScript := `pkgs <- c("clusterProfiler","org.Hs.eg.db","jsonlite")
-missing <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly=TRUE)]
-if (length(missing) > 0) {
-  cat(paste(missing, collapse=","))
-  quit(status=2)
-}`
-	cmd := exec.Command("Rscript", "-e", checkScript)
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		return nil
+func resolveRSBinary() (string, error) {
+	if configured := strings.TrimSpace(os.Getenv(envRSBinary)); configured != "" {
+		if _, err := exec.LookPath(configured); err != nil {
+			return "", fmt.Errorf("%s=%q not found in PATH: %w", envRSBinary, configured, err)
+		}
+		return configured, nil
 	}
-	msg := strings.TrimSpace(string(out))
-	if msg == "" {
-		return fmt.Errorf("failed to validate R packages: %w", err)
+	for _, candidate := range []string{"rs", "rs-reborn"} {
+		if path, err := exec.LookPath(candidate); err == nil {
+			return path, nil
+		}
 	}
-	return fmt.Errorf("missing required R packages: %s", msg)
+	return "", errors.New("rs-reborn CLI not found in PATH (expected `rs` or `rs-reborn`); install from https://github.com/rainoffallingstar/rs-reborn")
+}
+
+func ensureRReady() error {
+	_, err := resolveRSBinary()
+	return err
+}
+
+func runRScriptWithRS(scriptPath string, scriptArgs []string, env []string) error {
+	rsBin, err := resolveRSBinary()
+	if err != nil {
+		return err
+	}
+	args := make([]string, 0, 2+len(scriptArgs))
+	args = append(args, "run", scriptPath)
+	args = append(args, scriptArgs...)
+	cmd := exec.Command(rsBin, args...)
+	cmd.Env = env
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("rs-reborn run failed: %w", err)
+	}
+	return nil
 }
 
 func runRMode(opts *rRunOptions) error {
@@ -147,11 +164,7 @@ func runRMode(opts *rRunOptions) error {
 		env = append(env, "ALIGN_R_MSIGDB_GMT_FILE="+msigdbGMT)
 	}
 
-	cmd := exec.Command("Rscript", scriptPath, opts.InputFile, tmpOut)
-	cmd.Env = env
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := runRScriptWithRS(scriptPath, []string{opts.InputFile, tmpOut}, env); err != nil {
 		return fmt.Errorf("R baseline failed: %w", err)
 	}
 
