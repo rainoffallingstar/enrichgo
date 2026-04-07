@@ -43,7 +43,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y libpng-dev libcurl4-openssl-dev pkg-config
+          sudo apt-get install -y libpng-dev libcurl4-openssl-dev libfontconfig1-dev libfreetype6-dev libharfbuzz-dev libfribidi-dev pkg-config
 
       - name: Unit tests
         run: go test ./...
