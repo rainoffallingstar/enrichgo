@@ -193,6 +193,25 @@ func resolveRResultFile(command, db string) (string, error) {
 	return "", fmt.Errorf("unsupported command/database for R mode: %s/%s", command, db)
 }
 
+func normalizeBenchmarkSubprocessArgs(args []string) []string {
+	if len(args) == 0 {
+		return args
+	}
+	out := append([]string{}, args...)
+	switch out[0] {
+	case "enrich":
+		return append([]string{"analyze", "ora"}, out[1:]...)
+	case "gsea":
+		return append([]string{"analyze", "gsea"}, out[1:]...)
+	case "download":
+		return append([]string{"data", "sync"}, out[1:]...)
+	case "db-audit":
+		return append([]string{"db", "audit"}, out[1:]...)
+	default:
+		return out
+	}
+}
+
 func runBenchmarkMode(command, database, outputFile, benchmarkOut string) error {
 	exePath, err := os.Executable()
 	if err != nil {
@@ -203,7 +222,7 @@ func runBenchmarkMode(command, database, outputFile, benchmarkOut string) error 
 	}
 	rOutput := deriveOutputPath(outputFile, ".r")
 
-	baseArgs := append([]string{}, os.Args[1:]...)
+	baseArgs := normalizeBenchmarkSubprocessArgs(append([]string{}, os.Args[1:]...))
 	goArgs := append(baseArgs, "--benchmark=false", "--use-r=false", "-o", outputFile)
 	rArgs := append(baseArgs, "--benchmark=false", "--use-r=true", "-o", rOutput)
 

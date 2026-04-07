@@ -51,3 +51,56 @@ func TestDeriveOutputPath(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeBenchmarkSubprocessArgs(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{
+			name: "legacy enrich",
+			in:   []string{"enrich", "-i", "x.tsv"},
+			want: []string{"analyze", "ora", "-i", "x.tsv"},
+		},
+		{
+			name: "legacy gsea",
+			in:   []string{"gsea", "-i", "x.tsv"},
+			want: []string{"analyze", "gsea", "-i", "x.tsv"},
+		},
+		{
+			name: "legacy download",
+			in:   []string{"download", "-d", "kegg"},
+			want: []string{"data", "sync", "-d", "kegg"},
+		},
+		{
+			name: "legacy db-audit",
+			in:   []string{"db-audit", "--db", "x.db"},
+			want: []string{"db", "audit", "--db", "x.db"},
+		},
+		{
+			name: "already public",
+			in:   []string{"analyze", "ora", "-i", "x.tsv"},
+			want: []string{"analyze", "ora", "-i", "x.tsv"},
+		},
+		{
+			name: "empty",
+			in:   []string{},
+			want: []string{},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := normalizeBenchmarkSubprocessArgs(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("len(got)=%d, want=%d; got=%v want=%v", len(got), len(tc.want), got, tc.want)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Fatalf("got[%d]=%q, want=%q; got=%v want=%v", i, got[i], tc.want[i], got, tc.want)
+				}
+			}
+		})
+	}
+}
