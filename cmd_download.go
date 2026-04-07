@@ -337,39 +337,26 @@ func writeBasicIDMapsToSQLite(ctx context.Context, st *store.SQLiteStore, specie
 		}
 	}
 
-	type linkSpec struct {
-		target string
-		typ    annotation.IDType
+	pairs, err := database.FetchKEGGConv(species, "uniprot")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to fetch KEGG conv uniprot for %s: %v\n", species, err)
+		return nil
 	}
-	links := []linkSpec{
-		{target: "uniprot", typ: annotation.IDUniprot},
-		{target: "ensembl", typ: annotation.IDEnsembl},
-		{target: "refseq", typ: annotation.IDRefSeq},
+	if len(pairs) == 0 {
+		return nil
 	}
-	for _, spec := range links {
-		pairs, err := database.FetchKEGGLinks(species, spec.target)
-		if err != nil {
-			// Not all targets exist for all species; keep going.
-			fmt.Fprintf(os.Stderr, "Warning: failed to fetch KEGG link %s for %s: %v\n", spec.target, species, err)
-			continue
-		}
-		if len(pairs) == 0 {
-			continue
-		}
 
-		entrezToExt := make([]store.IDMapRow, 0, len(pairs))
-		extToEntrez := make([]store.IDMapRow, 0, len(pairs))
-		for _, p := range pairs {
-			entrezToExt = append(entrezToExt, store.IDMapRow{From: p.Entrez, To: p.External})
-			extToEntrez = append(extToEntrez, store.IDMapRow{From: p.External, To: p.Entrez})
-		}
-		source := "kegg_link_" + spec.target
-		if err := st.ReplaceIDMap(ctx, species, source, string(annotation.IDEntrez), string(spec.typ), entrezToExt); err != nil {
-			return err
-		}
-		if err := st.ReplaceIDMap(ctx, species, source, string(spec.typ), string(annotation.IDEntrez), extToEntrez); err != nil {
-			return err
-		}
+	entrezToUni := make([]store.IDMapRow, 0, len(pairs))
+	uniToEntrez := make([]store.IDMapRow, 0, len(pairs))
+	for _, p := range pairs {
+		entrezToUni = append(entrezToUni, store.IDMapRow{From: p.Entrez, To: p.External})
+		uniToEntrez = append(uniToEntrez, store.IDMapRow{From: p.External, To: p.Entrez})
+	}
+	if err := st.ReplaceIDMap(ctx, species, "kegg_link_uniprot", string(annotation.IDEntrez), string(annotation.IDUniprot), entrezToUni); err != nil {
+		return err
+	}
+	if err := st.ReplaceIDMap(ctx, species, "kegg_link_uniprot", string(annotation.IDUniprot), string(annotation.IDEntrez), uniToEntrez); err != nil {
+		return err
 	}
 	return nil
 }

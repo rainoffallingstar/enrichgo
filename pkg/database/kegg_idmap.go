@@ -160,3 +160,61 @@ func FetchKEGGLinks(species, target string) ([]KEGGLinkPair, error) {
 	}
 	return pairs, nil
 }
+
+// FetchKEGGConv fetches KEGG conv mappings for a species.
+// It expects KEGG gene IDs on the left column (<species>:<gene>) and external IDs on the right.
+func FetchKEGGConv(species, target string) ([]KEGGLinkPair, error) {
+	species = strings.ToLower(strings.TrimSpace(species))
+	target = strings.ToLower(strings.TrimSpace(target))
+	if species == "" || target == "" {
+		return nil, fmt.Errorf("empty species/target")
+	}
+
+	url := fmt.Sprintf("https://rest.kegg.jp/conv/%s/%s", target, species)
+	client := netutil.NewClient(netutil.Options{Timeout: 60 * time.Second})
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("KEGG API error: %s", resp.Status)
+	}
+
+	var pairs []KEGGLinkPair
+	sc := bufio.NewScanner(resp.Body)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "\t")
+		if len(parts) < 2 {
+			continue
+		}
+		left := strings.TrimSpace(parts[0])  // "<species>:<gene>"
+		right := strings.TrimSpace(parts[1]) // "<db>:<id>" or "<id>"
+		if left == "" || right == "" {
+			continue
+		}
+		entrez := strings.TrimPrefix(left, species+":")
+		entrez = strings.TrimSpace(entrez)
+		if entrez == "" {
+			continue
+		}
+		ext := right
+		if idx := strings.Index(ext, ":"); idx >= 0 {
+			ext = ext[idx+1:]
+		}
+		ext = strings.TrimSpace(ext)
+		if ext == "" {
+			continue
+		}
+		pairs = append(pairs, KEGGLinkPair{Entrez: entrez, External: ext})
+	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	return pairs, nil
+}
