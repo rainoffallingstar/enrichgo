@@ -103,72 +103,12 @@ func writeExtendedIDMapsToSQLiteWithResume(ctx context.Context, st *store.SQLite
 		return err
 	}
 
-	type streamDropStats struct {
-		seen    int64
-		kept    int64
-		dropped int64
-	}
-	makeFilteredEmit := func(emit store.IDMapEmit, stats *streamDropStats) store.IDMapEmit {
-		return func(from, to string) error {
-			if stats != nil {
-				stats.seen++
-			}
-			from = strings.TrimSpace(from)
-			to = strings.TrimSpace(to)
-			if from == "" || to == "" {
-				if stats != nil {
-					stats.dropped++
-				}
-				return nil
-			}
-			if stats != nil {
-				stats.kept++
-			}
-			return emit(from, to)
+	for _, step := range buildExtendedIDMapSteps(species, taxID, client) {
+		if err := runExtendedIDMapSource(ctx, st, species, step.source, step.fromType, step.toType, resume, step.produce); err != nil {
+			return err
 		}
+		logExtendedIDMapStepStats(step)
 	}
-
-	if err := runExtendedIDMapSource(ctx, st, species, "ncbi_gene_info", string(annotation.IDSymbol), string(annotation.IDEntrez), resume, func(emit store.IDMapEmit) error {
-		return database.StreamNCBIGeneInfoForSpecies(species, taxID, client,
-			func(entrez, symbol string) error { return nil },
-			func(symbol, entrez string) error { return emit(symbol, entrez) },
-		)
-	}); err != nil {
-		return err
-	}
-
-	if err := runExtendedIDMapSource(ctx, st, species, "ncbi_gene2ensembl", string(annotation.IDEnsembl), string(annotation.IDEntrez), resume, func(emit store.IDMapEmit) error {
-		return database.StreamNCBIGene2Ensembl(taxID, client,
-			func(ensembl, entrez string) error { return emit(ensembl, entrez) },
-			func(entrez, ensembl string) error { return nil },
-		)
-	}); err != nil {
-		return err
-	}
-
-	refseqStats := &streamDropStats{}
-	if err := runExtendedIDMapSource(ctx, st, species, "ncbi_gene2refseq", string(annotation.IDRefSeq), string(annotation.IDEntrez), resume, func(emit store.IDMapEmit) error {
-		filtered := makeFilteredEmit(emit, refseqStats)
-		return database.StreamNCBIGene2RefSeq(taxID, client,
-			func(refseq, entrez string) error { return filtered(refseq, entrez) },
-			func(entrez, refseq string) error { return nil },
-		)
-	}); err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stderr, "Info: idmaps REFSEQ->ENTREZ kept=%d dropped_empty=%d seen=%d\n", refseqStats.kept, refseqStats.dropped, refseqStats.seen)
-
-	uniProtStats := &streamDropStats{}
-	if err := runExtendedIDMapSource(ctx, st, species, "uniprot_idmapping_selected", string(annotation.IDUniprot), string(annotation.IDEntrez), resume, func(emit store.IDMapEmit) error {
-		filtered := makeFilteredEmit(emit, uniProtStats)
-		return database.StreamUniProtIDMappingSelected(taxID, client,
-			func(uniprot, entrez string) error { return filtered(uniprot, entrez) },
-			func(entrez, uniprot string) error { return nil },
-		)
-	}); err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stderr, "Info: idmaps UNIPROT->ENTREZ kept=%d dropped_empty=%d seen=%d\n", uniProtStats.kept, uniProtStats.dropped, uniProtStats.seen)
 
 	if err := writeKEGGFallbackIDMapsBestEffort(ctx, species, 2, 5*time.Second, func(innerCtx context.Context, sp string) error {
 		return writeBasicIDMapsToSQLite(innerCtx, st, sp)

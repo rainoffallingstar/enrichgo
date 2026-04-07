@@ -188,6 +188,29 @@ func TestWriteBasicIDMapsFromLocalTSV(t *testing.T) {
 	}
 }
 
+func TestBuildExtendedIDMapStepsSlimmedSources(t *testing.T) {
+	steps := buildExtendedIDMapSteps("hsa", 9606, nil)
+	if len(steps) != 1 {
+		t.Fatalf("len(steps)=%d want 1", len(steps))
+	}
+	wantSources := []string{"ncbi_gene_info"}
+	wantFromTypes := []string{"SYMBOL"}
+	for i, step := range steps {
+		if step.source != wantSources[i] {
+			t.Fatalf("step %d source=%q want %q", i, step.source, wantSources[i])
+		}
+		if step.fromType != wantFromTypes[i] {
+			t.Fatalf("step %d fromType=%q want %q", i, step.fromType, wantFromTypes[i])
+		}
+		if step.toType != "ENTREZID" {
+			t.Fatalf("step %d toType=%q want ENTREZID", i, step.toType)
+		}
+		if step.source == "ncbi_gene2ensembl" || step.source == "ncbi_gene2refseq" || step.source == "uniprot_idmapping_selected" {
+			t.Fatalf("extended steps should not include removed source %q", step.source)
+		}
+	}
+}
+
 func TestRunExtendedIDMapSourceResumeSkip(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := dir + "/test.db"

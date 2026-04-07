@@ -52,8 +52,8 @@ func runDownload(cmd *flag.FlagSet) {
 	cmd.BoolVar(&c.all, "all", false, "Download all collections (h,c1-c8) for msigdb")
 	cmd.StringVar(&c.dbPath, "db", "", "Optional SQLite cache DB path (offline bundle). When set, downloaded data is stored into this DB")
 	cmd.BoolVar(&c.dbOnly, "db-only", false, "When used with --db, skip writing GMT/TSV cache files and only write into the SQLite DB")
-	cmd.BoolVar(&c.withIDMaps, "idmaps", true, "When used with --db, also fetch and store offline ID mappings (SYMBOL/ENTREZ/UNIPROT/ENSEMBL/REFSEQ)")
-	cmd.StringVar(&c.idMapsLevel, "idmaps-level", "basic", "ID mapping level when used with --db --idmaps: basic (KEGG list/link) or extended (NCBI+UniProt dumps; larger but more complete)")
+	cmd.BoolVar(&c.withIDMaps, "idmaps", true, "When used with --db, also fetch and store offline ID mappings (SYMBOL/ENTREZ)")
+	cmd.StringVar(&c.idMapsLevel, "idmaps-level", "basic", "ID mapping level when used with --db --idmaps: basic (KEGG symbol list) or extended (NCBI gene_info symbol map; larger but more complete)")
 	cmd.IntVar(&c.idMapsRetries, "idmaps-retries", 2, "Retry count for --idmaps sync on timeout/transient network errors")
 	cmd.DurationVar(&c.idMapsRetryBackoff, "idmaps-retry-backoff", 20*time.Second, "Backoff between --idmaps retries")
 	cmd.DurationVar(&c.idMapsTimeout, "idmaps-timeout", 240*time.Minute, "Per-attempt timeout for writing --idmaps into SQLite")
@@ -337,27 +337,6 @@ func writeBasicIDMapsToSQLite(ctx context.Context, st *store.SQLiteStore, specie
 		}
 	}
 
-	pairs, err := database.FetchKEGGConv(species, "uniprot")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to fetch KEGG conv uniprot for %s: %v\n", species, err)
-		return nil
-	}
-	if len(pairs) == 0 {
-		return nil
-	}
-
-	entrezToUni := make([]store.IDMapRow, 0, len(pairs))
-	uniToEntrez := make([]store.IDMapRow, 0, len(pairs))
-	for _, p := range pairs {
-		entrezToUni = append(entrezToUni, store.IDMapRow{From: p.Entrez, To: p.External})
-		uniToEntrez = append(uniToEntrez, store.IDMapRow{From: p.External, To: p.Entrez})
-	}
-	if err := st.ReplaceIDMap(ctx, species, "kegg_link_uniprot", string(annotation.IDEntrez), string(annotation.IDUniprot), entrezToUni); err != nil {
-		return err
-	}
-	if err := st.ReplaceIDMap(ctx, species, "kegg_link_uniprot", string(annotation.IDUniprot), string(annotation.IDEntrez), uniToEntrez); err != nil {
-		return err
-	}
 	return nil
 }
 
@@ -367,76 +346,12 @@ func writeExtendedIDMapsToSQLite(ctx context.Context, st *store.SQLiteStore, spe
 		return err
 	}
 
-	type streamDropStats struct {
-		seen    int64
-		kept    int64
-		dropped int64
-	}
-	makeFilteredEmit := func(emit store.IDMapEmit, stats *streamDropStats) store.IDMapEmit {
-		return func(from, to string) error {
-			if stats != nil {
-				stats.seen++
-			}
-			from = strings.TrimSpace(from)
-			to = strings.TrimSpace(to)
-			if from == "" || to == "" {
-				if stats != nil {
-					stats.dropped++
-				}
-				return nil
-			}
-			if stats != nil {
-				stats.kept++
-			}
-			return emit(from, to)
+	for _, step := range buildExtendedIDMapSteps(species, taxID, client) {
+		if err := st.ReplaceIDMapStream(ctx, species, step.source, step.fromType, step.toType, step.produce); err != nil {
+			return err
 		}
+		logExtendedIDMapStepStats(step)
 	}
-
-	// NCBI gene_info: SYMBOL -> ENTREZ (includes official symbol + synonyms).
-	if err := st.ReplaceIDMapStream(ctx, species, "ncbi_gene_info", string(annotation.IDSymbol), string(annotation.IDEntrez), func(emit store.IDMapEmit) error {
-		return database.StreamNCBIGeneInfoForSpecies(species, taxID, client,
-			func(entrez, symbol string) error { return nil },
-			func(symbol, entrez string) error { return emit(symbol, entrez) },
-		)
-	}); err != nil {
-		return err
-	}
-
-	// NCBI gene2ensembl: ENSEMBL -> ENTREZ
-	if err := st.ReplaceIDMapStream(ctx, species, "ncbi_gene2ensembl", string(annotation.IDEnsembl), string(annotation.IDEntrez), func(emit store.IDMapEmit) error {
-		return database.StreamNCBIGene2Ensembl(taxID, client,
-			func(ensembl, entrez string) error { return emit(ensembl, entrez) },
-			func(entrez, ensembl string) error { return nil },
-		)
-	}); err != nil {
-		return err
-	}
-
-	// NCBI gene2refseq: REFSEQ -> ENTREZ; drop rows with empty side after mapping.
-	refseqStats := &streamDropStats{}
-	if err := st.ReplaceIDMapStream(ctx, species, "ncbi_gene2refseq", string(annotation.IDRefSeq), string(annotation.IDEntrez), func(emit store.IDMapEmit) error {
-		filtered := makeFilteredEmit(emit, refseqStats)
-		return database.StreamNCBIGene2RefSeq(taxID, client,
-			func(refseq, entrez string) error { return filtered(refseq, entrez) },
-			func(entrez, refseq string) error { return nil },
-		)
-	}); err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stderr, "Info: idmaps REFSEQ->ENTREZ kept=%d dropped_empty=%d seen=%d\n", refseqStats.kept, refseqStats.dropped, refseqStats.seen)
-
-	// UniProt idmapping_selected: UNIPROT -> ENTREZ; drop rows with empty side after mapping.
-	uniProtStats := &streamDropStats{}
-	if err := st.ReplaceIDMapStream(ctx, species, "uniprot_idmapping_selected", string(annotation.IDUniprot), string(annotation.IDEntrez), func(emit store.IDMapEmit) error {
-		filtered := makeFilteredEmit(emit, uniProtStats)
-		return database.StreamUniProtIDMappingSelected(taxID, client,
-			func(uniprot, entrez string) error { return filtered(uniprot, entrez) },
-			func(entrez, uniprot string) error { return nil },
-		)
-	}); err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stderr, "Info: idmaps UNIPROT->ENTREZ kept=%d dropped_empty=%d seen=%d\n", uniProtStats.kept, uniProtStats.dropped, uniProtStats.seen)
 
 	// Keep KEGG-derived maps as additional fallback (best-effort).
 	if err := writeKEGGFallbackIDMapsBestEffort(ctx, species, 2, 5*time.Second, func(innerCtx context.Context, sp string) error {

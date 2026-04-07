@@ -87,3 +87,13 @@ func TestAuditWithContractPassesWhenMinimumDataPresent(t *testing.T) {
 		t.Fatalf("expected contract valid, violations=%v", report.ContractViolations)
 	}
 }
+
+func TestResolveAuditContractExtendedAliasCanonicalizes(t *testing.T) {
+	contract, err := resolveAuditContract("embedded-hsa-extended")
+	if err != nil {
+		t.Fatalf("resolveAuditContract: %v", err)
+	}
+	if contract.Profile != "embedded-hsa-extended-sru" {
+		t.Fatalf("canonical profile=%q want embedded-hsa-extended-sru", contract.Profile)
+	}
+}

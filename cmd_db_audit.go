@@ -41,7 +41,7 @@ func runDBAudit(cmd *flag.FlagSet) {
 
 	cmd.StringVar(&c.dbPath, "db", "", "SQLite DB path (required)")
 	cmd.StringVar(&c.format, "fmt", "text", "Output format: text, json")
-	cmd.StringVar(&c.profile, "profile", "", "Optional data-contract profile: embedded-hsa-seed, embedded-hsa-basic, embedded-hsa-extended")
+	cmd.StringVar(&c.profile, "profile", "", "Optional data-contract profile: embedded-hsa-seed, embedded-hsa-basic, embedded-hsa-extended-sru (legacy alias: embedded-hsa-extended)")
 	cmd.BoolVar(&c.strictContract, "strict-contract", true, "When --profile is set, fail command if contract checks fail")
 	cmd.StringVar(&c.expectSHA256, "expect-sha256", "", "Optional expected SHA256 of --db; mismatch fails audit")
 	cmd.BoolVar(&c.expectEmbeddedManifest, "expect-embedded-manifest", false, "Use embedded manifest SHA256 + contract_profile as expected values")

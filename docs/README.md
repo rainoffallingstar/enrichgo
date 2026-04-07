@@ -51,6 +51,7 @@
 - 默认发布二进制内置 SQLite 默认库（固定 profile：`species=hsa`，`idmaps_level=basic`），不传 `--db` 会自动使用。
 - 内置库附带 `assets/default_enrichgo.db.manifest.json`（`sha256` + `contract_profile`），可通过 `enrichgo db audit --db <path> --expect-embedded-manifest` 做一致性校验。
 - 也可用 `--db` 将通路库与 ID 映射打包到单个 SQLite 文件，运行时通过 `--db` 直接读取（更便于分发与复用）。
+- `--idmaps-level extended` 当前离线只回填 `symbol -> entrez`；`UNIPROT`、`REFSEQ`、`ENSEMBL` 仍可检测，但默认不再预填到离线 SQLite。
 
 ```bash
 # 首次联网缓存

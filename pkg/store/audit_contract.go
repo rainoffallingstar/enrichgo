@@ -24,9 +24,26 @@ func resolveAuditContract(profile string) (*auditContract, error) {
 	case "embedded-hsa-seed":
 		// Seed profile only checks core schema health; row counts are intentionally not constrained.
 		return &auditContract{Profile: profile}, nil
-	case "embedded-hsa-basic", "embedded-hsa-extended":
+	case "embedded-hsa-basic":
 		return &auditContract{
 			Profile: profile,
+			MinTableRows: map[string]int64{
+				"geneset":      1,
+				"geneset_gene": 1,
+				"idmap":        1,
+			},
+			IDMapMins: []auditIDMapRequirement{
+				{Species: "hsa", FromType: "SYMBOL", ToType: "ENTREZID", MinRows: 1},
+				{Species: "hsa", FromType: "ENTREZID", ToType: "SYMBOL", MinRows: 1},
+			},
+		}, nil
+	case "embedded-hsa-extended", "embedded-hsa-extended-sru":
+		canonicalProfile := profile
+		if strings.EqualFold(strings.TrimSpace(profile), "embedded-hsa-extended") {
+			canonicalProfile = "embedded-hsa-extended-sru"
+		}
+		return &auditContract{
+			Profile: canonicalProfile,
 			MinTableRows: map[string]int64{
 				"geneset":      1,
 				"geneset_gene": 1,

@@ -40,6 +40,12 @@ func (c *SQLiteIDConverter) Convert(geneIDs []string, fromType, toType IDType, s
 		// Keep as a final formatting step.
 	}
 
+	switch toType {
+	case IDEntrez, IDSymbol, IDKEGG:
+	default:
+		return nil, fmt.Errorf("unsupported toType for sqlite conversion: %s", toType)
+	}
+
 	// Step 1: map input -> ENTREZ IDs (or normalize ENTREZ directly).
 	entrezByOrig, err := c.toEntrez(geneIDs, fromType, species)
 	if err != nil {
@@ -115,7 +121,7 @@ func (c *SQLiteIDConverter) toEntrez(geneIDs []string, fromType IDType, species 
 			}
 		}
 		return out, nil
-	case IDSymbol, IDUniprot, IDEnsembl, IDRefSeq:
+	case IDSymbol:
 		// continue
 	default:
 		return nil, fmt.Errorf("unsupported fromType for sqlite conversion: %s", fromType)
@@ -182,4 +188,3 @@ func normalizeEntrezLocal(s, species string) string {
 	s = strings.TrimPrefix(s, "ncbi-geneid:")
 	return strings.TrimSpace(s)
 }
-

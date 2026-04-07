@@ -47,6 +47,7 @@
 - 默认 MSigDB 范围为 `c1-c8`，可用 `-c c2` 或 `-c c1,c2` 覆盖。
 - ID 转换在网络不可用时会默认报错退出，避免“静默0结果”。
 - `download -d kegg` 会额外缓存 `kegg_<species>_idmap.tsv`，供离线 ID 转换复用。
+- `extended` 离线 SQLite 当前只额外覆盖 `symbol -> entrez`，不再默认预填 `UNIPROT`、`REFSEQ`、`ENSEMBL`。
 
 ---
 
@@ -64,7 +65,8 @@
 
 ### ID 转换
 - 自动检测输入 ID 类型
-- 调用 KEGG REST API 转换
+- 优先使用离线 SQLite / 本地 KEGG 映射，缺失时再按策略在线转换
+- 离线 SQLite 转换统一走 `X -> ENTREZ -> Y` 两跳
 - 内存缓存结果
 
 ---

@@ -9,6 +9,7 @@ enrichgo 是 clusterProfiler 的 Go 语言 CLI 实现，用于基因集富集分
 - **ORA (Over-Representation Analysis)**: 超几何检验
 - **GSEA (Gene Set Enrichment Analysis)**: 基因集富集分析
 - **ID 类型自动检测与转换**: 支持 ENTREZ, SYMBOL, ENSEMBL, UNIPROT, KEGG, REFSEQ
+- **离线 SQLite 映射覆盖**: `basic` 主要覆盖 KEGG `symbol <-> entrez`；`extended` 改为使用 NCBI `gene_info` 回填 `symbol -> entrez`，默认不再预填 `UNIPROT`、`REFSEQ`、`ENSEMBL`
 
 ### 支持的数据库
 
@@ -97,6 +98,7 @@ type KEGGIDConverter struct {
 ```
 
 - 使用 KEGG REST API 进行转换
+- 离线 SQLite 转换统一走 `X -> ENTREZ -> Y` 两跳
 - 内存缓存机制避免重复请求
 - 缓存 key: `species:fromType:toType`
 
