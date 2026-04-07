@@ -32,6 +32,17 @@ if [[ "$ALIGN_USE_EMBEDDED_DB" != "1" ]]; then
   ALIGN_ANALYSIS_FLAGS+=(--use-embedded-db=false)
 fi
 
+abs_path() {
+  python3 - "$1" <<'PY'
+import os, sys
+print(os.path.abspath(sys.argv[1]))
+PY
+}
+
+INPUT_CSV="$(abs_path "$INPUT_CSV")"
+OUT_DIR="$(abs_path "$OUT_DIR")"
+DATA_DIR="$(abs_path "$DATA_DIR")"
+
 mkdir -p "$OUT_DIR" "$DATA_DIR"
 
 if [[ ! -f "$INPUT_CSV" ]]; then
@@ -345,7 +356,7 @@ ALIGN_INCLUDE_REACTOME="$ALIGN_INCLUDE_REACTOME" \
 ALIGN_INCLUDE_MSIGDB="$ALIGN_INCLUDE_MSIGDB" \
 ALIGN_R_REACTOME_GMT_FILE="$REACTOME_GMT_FILE" \
 ALIGN_R_MSIGDB_GMT_FILE="$MSIGDB_GMT_FILE" \
-"${ENRICHGO_RS_BIN:-rs}" run "$ROOT_DIR/scripts/alignment/clusterprofiler_baseline.R" "$INPUT_CSV" "$OUT_DIR"
+"${ENRICHGO_RS_BIN:-rvx}" run "$ROOT_DIR/scripts/alignment/clusterprofiler_baseline.R" "$INPUT_CSV" "$OUT_DIR"
 
 # 3) Compare & score
 echo "Comparing Go vs R outputs..."

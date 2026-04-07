@@ -53,12 +53,12 @@ func resolveRSBinary() (string, error) {
 		}
 		return configured, nil
 	}
-	for _, candidate := range []string{"rs", "rs-reborn"} {
+	for _, candidate := range []string{"rvx", "rs-reborn", "rs"} {
 		if path, err := exec.LookPath(candidate); err == nil {
 			return path, nil
 		}
 	}
-	return "", errors.New("rs-reborn CLI not found in PATH (expected `rs` or `rs-reborn`); install from https://github.com/rainoffallingstar/rs-reborn")
+	return "", errors.New("rs-reborn CLI not found in PATH (expected `rvx` (preferred), `rs-reborn`, or `rs`); install from https://github.com/rainoffallingstar/rs-reborn")
 }
 
 func ensureRReady() error {
@@ -116,6 +116,15 @@ func runRMode(opts *rRunOptions) error {
 		return err
 	}
 
+	inputAbs, err := filepath.Abs(opts.InputFile)
+	if err != nil {
+		return fmt.Errorf("resolve input path: %w", err)
+	}
+	dataDirAbs, err := filepath.Abs(opts.DataDir)
+	if err != nil {
+		return fmt.Errorf("resolve data-dir path: %w", err)
+	}
+
 	env := os.Environ()
 	env = append(env, "ALIGN_NPERM="+strconv.Itoa(opts.NPerm))
 	env = append(env, "ALIGN_ONLY_ORA="+boolEnv(opts.Command == "enrich"))
@@ -135,10 +144,10 @@ func runRMode(opts *rRunOptions) error {
 	env = append(env, "ALIGN_LOGFC_COL="+opts.LogFCCol)
 	env = append(env, "ALIGN_LOGFC_THRESHOLD="+strconv.FormatFloat(opts.LogFCThreshold, 'g', -1, 64))
 
-	keggGMT := filepath.Join(opts.DataDir, fmt.Sprintf("%s.gmt", opts.Species))
-	keggIDMap := filepath.Join(opts.DataDir, fmt.Sprintf("kegg_%s_idmap.tsv", opts.Species))
-	goGMT := filepath.Join(opts.DataDir, fmt.Sprintf("go_%s_%s.gmt", opts.Species, strings.ToUpper(opts.Ontology)))
-	reactomeGMT := filepath.Join(opts.DataDir, fmt.Sprintf("reactome_%s.gmt", opts.Species))
+	keggGMT := filepath.Join(dataDirAbs, fmt.Sprintf("%s.gmt", opts.Species))
+	keggIDMap := filepath.Join(dataDirAbs, fmt.Sprintf("kegg_%s_idmap.tsv", opts.Species))
+	goGMT := filepath.Join(dataDirAbs, fmt.Sprintf("go_%s_%s.gmt", opts.Species, strings.ToUpper(opts.Ontology)))
+	reactomeGMT := filepath.Join(dataDirAbs, fmt.Sprintf("reactome_%s.gmt", opts.Species))
 
 	if fileExists(keggGMT) {
 		env = append(env, "ALIGN_R_KEGG_GMT_FILE="+keggGMT)
@@ -157,14 +166,14 @@ func runRMode(opts *rRunOptions) error {
 		env = append(env, "ALIGN_R_REACTOME_GMT_FILE="+reactomeGMT)
 	}
 	if db == "msigdb" {
-		msigdbGMT, err := buildMergedMSigDBGMT(opts.DataDir, opts.Collection, tmpOut)
+		msigdbGMT, err := buildMergedMSigDBGMT(dataDirAbs, opts.Collection, tmpOut)
 		if err != nil {
 			return err
 		}
 		env = append(env, "ALIGN_R_MSIGDB_GMT_FILE="+msigdbGMT)
 	}
 
-	if err := runRScriptWithRS(scriptPath, []string{opts.InputFile, tmpOut}, env); err != nil {
+	if err := runRScriptWithRS(scriptPath, []string{inputAbs, tmpOut}, env); err != nil {
 		return fmt.Errorf("R baseline failed: %w", err)
 	}
 

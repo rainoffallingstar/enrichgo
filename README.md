@@ -130,7 +130,7 @@ benchmark 输出示例列：
 
 在 `--use-r` 或 `--benchmark` 模式下，程序会先检查：
 
-- `rs` 或 `rs-reborn` 是否可用（可用环境变量 `ENRICHGO_RS_BIN` 指定二进制名/路径）
+- `rvx`（来自 rs-reborn） 是否可用（可用环境变量 `ENRICHGO_RS_BIN` 指定二进制名/路径）
 
 R 包安装与脚本依赖解析由 `rs-reborn` 负责（按脚本依赖自动管理）。缺失时会直接报错退出（fail-fast）。
 
