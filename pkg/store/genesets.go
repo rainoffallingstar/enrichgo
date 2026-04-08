@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -118,7 +119,7 @@ func (s *SQLiteStore) ReplaceGeneSets(ctx context.Context, f GeneSetFilter, gene
 		return pk, nil
 	}
 
-	for _, gs := range sets {
+	for _, gs := range sortedGeneSets(sets) {
 		if gs == nil || strings.TrimSpace(gs.ID) == "" {
 			continue
 		}
@@ -133,11 +134,7 @@ func (s *SQLiteStore) ReplaceGeneSets(ctx context.Context, f GeneSetFilter, gene
 		if _, err := insTerm.ExecContext(ctx, datasetID, gs.ID, name, desc); err != nil {
 			return err
 		}
-		for gene := range gs.Genes {
-			gene = strings.TrimSpace(gene)
-			if gene == "" {
-				continue
-			}
+		for _, gene := range sortedGeneIDs(gs.Genes) {
 			pk, err := resolveGenePK(gene)
 			if err != nil {
 				return err
@@ -156,6 +153,41 @@ func (s *SQLiteStore) ReplaceGeneSets(ctx context.Context, f GeneSetFilter, gene
 	}
 
 	return tx.Commit()
+}
+
+func sortedGeneSets(sets types.GeneSets) types.GeneSets {
+	ordered := append(types.GeneSets(nil), sets...)
+	sort.Slice(ordered, func(i, j int) bool {
+		left := ordered[i]
+		right := ordered[j]
+		if left == nil {
+			return right != nil
+		}
+		if right == nil {
+			return false
+		}
+		if left.ID != right.ID {
+			return left.ID < right.ID
+		}
+		if left.Name != right.Name {
+			return left.Name < right.Name
+		}
+		return left.Description < right.Description
+	})
+	return ordered
+}
+
+func sortedGeneIDs(genes map[string]bool) []string {
+	ordered := make([]string, 0, len(genes))
+	for gene := range genes {
+		gene = strings.TrimSpace(gene)
+		if gene == "" {
+			continue
+		}
+		ordered = append(ordered, gene)
+	}
+	sort.Strings(ordered)
+	return ordered
 }
 
 func ensureDatasetForReplace(ctx context.Context, tx *sql.Tx, f GeneSetFilter, geneIDType, version, now string) (int64, error) {
@@ -258,11 +290,8 @@ func (s *SQLiteStore) LoadGeneSets(ctx context.Context, f GeneSetFilter) (types.
 			}
 			lastID = setID
 		}
-		if current != nil && gene.Valid {
-			g := strings.TrimSpace(gene.String)
-			if g != "" {
-				current.Genes[g] = true
-			}
+		if gene.Valid && strings.TrimSpace(gene.String) != "" {
+			current.Genes[strings.TrimSpace(gene.String)] = true
 		}
 	}
 	if err := rows.Err(); err != nil {

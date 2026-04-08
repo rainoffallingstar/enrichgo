@@ -7,6 +7,7 @@ on:
       - '*.go'
       - 'cmd_*.go'
       - 'pkg/**'
+      - 'tools/**'
       - 'scripts/alignment/**'
       - 'test-data/**'
       - 'data/**'
@@ -51,28 +52,20 @@ jobs:
           EMBED_IDMAPS_LEVEL: basic
         run: |
           set -euo pipefail
-          mkdir -p assets
-
           CGO_ENABLED=0 go build -o /tmp/enrichgo-bootstrap .
-          /tmp/enrichgo-bootstrap data sync \
-            -d kegg -s "${EMBED_SPECIES}" \
-            --db "assets/default_enrichgo.db" --db-only \
-            --idmaps --idmaps-level "${EMBED_IDMAPS_LEVEL}" --idmaps-force-refresh
-
-          db_sha="$(sha256sum assets/default_enrichgo.db | awk '{print $1}')"
           manifest_profile="embedded-${EMBED_SPECIES}-${EMBED_IDMAPS_LEVEL}"
-          cat > assets/default_enrichgo.db.manifest.json <<MANIFEST
-          {
-            "schema_version": 2,
-            "artifact": "assets/default_enrichgo.db",
-            "sha256": "${db_sha}",
-            "contract_profile": "${manifest_profile}",
-            "species": "${EMBED_SPECIES}",
-            "idmaps_level": "${EMBED_IDMAPS_LEVEL}"
-          }
-          MANIFEST
 
-          audit_output="$(/tmp/enrichgo-bootstrap db audit --db "assets/default_enrichgo.db" --profile "${manifest_profile}" --strict-contract=true --expect-sha256 "${db_sha}")"
+          go run ./tools/build_embedded_db \
+            --db assets/default_enrichgo.db \
+            --manifest assets/default_enrichgo.db.manifest.json \
+            --artifact assets/default_enrichgo.db \
+            --data-dir data \
+            --species "${EMBED_SPECIES}" \
+            --contract-profile "${manifest_profile}" \
+            --idmaps-level "${EMBED_IDMAPS_LEVEL}" \
+            --go-ontology BP
+
+          audit_output="$(/tmp/enrichgo-bootstrap db audit --db "assets/default_enrichgo.db" --expect-embedded-manifest --strict-contract=true)"
           echo "$audit_output"
 
           extract_value() {
@@ -81,10 +74,12 @@ jobs:
           }
 
           [[ "$(extract_value status)" == "ok" ]]
-          [[ "$(extract_value rows.geneset)" -gt 0 ]]
-          [[ "$(extract_value rows.geneset_gene)" -gt 0 ]]
-          [[ "$(extract_value rows.idmap)" -gt 0 ]]
-          [[ "$(extract_value sha256_match)" == "true" ]]
+          [[ "$(extract_value contract_profile)" == "${manifest_profile}" ]]
+          [[ "$(extract_value rows.dataset)" -gt 0 ]]
+          [[ "$(extract_value rows.term)" -gt 0 ]]
+          [[ "$(extract_value rows.gene_dict)" -gt 0 ]]
+          [[ "$(extract_value rows.term_gene)" -gt 0 ]]
+          [[ "$(extract_value rows.idmap_canon)" -gt 0 ]]
 
       - name: Build
         run: go build -o enrichgo .

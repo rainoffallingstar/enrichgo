@@ -62,8 +62,8 @@ go build -o enrichgo .
   -o /tmp/gsea_kegg.tsv
 ```
 
-默认发布二进制内置一个 SQLite 默认库（CI 构建 profile: `species=hsa`, `idmaps_level=basic`）。
-不传 `--db` 时会自动使用内置库落盘副本（可用 `ENRICHGO_DEFAULT_DB_PATH` 指定默认落盘路径）。
+默认发布二进制内置一个 SQLite 默认库（当前 profile: `embedded-hsa-basic`，覆盖 `kegg/hsa`、`go/hsa/BP` 与基础 `SYMBOL <-> ENTREZID` 映射）。
+不传 `--db` 时会自动使用内置库落盘副本（可用 `ENRICHGO_DEFAULT_DB_PATH` 指定默认落盘路径）。若默认落盘路径存在旧 schema 或损坏 runtime DB，会自动重装内置库；当前 schema v1 不再复用。
 
 内置库同时携带 `assets/default_enrichgo.db.manifest.json` 元数据（包含 `sha256` 和 `contract_profile`）；运行时会先校验 manifest 与嵌入 DB 哈希一致性。
 
@@ -89,7 +89,7 @@ go build -o enrichgo .
 
 说明：
 - 默认会自动检测运行时 SQLite 覆盖是否不足并自动扩容（`--auto-update-db=true`）
-- 可通过 `--auto-update-db=false` 显式关闭自动扩容
+- 可通过 `--auto-update-db=false` 显式关闭自动扩容；当前内置库已直接覆盖 README 中的默认 `kegg` ORA 与 `go(BP)` GSEA 示例
 - `--update-db` 不支持 `-d custom`
 - `--update-db` 成功后，该 DB 会标记为用户管理，后续不会被内置默认库自动覆盖
 
@@ -130,9 +130,9 @@ benchmark 输出示例列：
 
 在 `--use-r` 或 `--benchmark` 模式下，程序会先检查：
 
-- `rvx`（来自 rs-reborn） 是否可用（可用环境变量 `ENRICHGO_RS_BIN` 指定二进制名/路径）
+- 优先使用 `rvx`（来自 rs-reborn）；若本机未安装 rs-reborn，则会回退到 `Rscript`（同样可用 `ENRICHGO_RS_BIN` 指定二进制名/路径）
 
-R 包安装与脚本依赖解析由 `rs-reborn` 负责（按脚本依赖自动管理）。缺失时会直接报错退出（fail-fast）。
+使用 `Rscript` 回退时，需要提前准备好 R 依赖；使用 rs-reborn 时，R 包安装与脚本依赖解析由 rs-reborn 负责。
 
 ## 常用参数
 

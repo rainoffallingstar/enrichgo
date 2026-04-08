@@ -42,13 +42,14 @@
 ./enrichgo data sync -d kegg -s hsa -o data/
 ```
 
-> 说明：`--use-r`/`--benchmark` 模式通过 `rs-reborn`（`rvx` 命令）调用 R 脚本。
+> 说明：`--use-r`/`--benchmark`/对齐脚本优先通过 `rs-reborn`（`rvx` 命令）调用 R 脚本；本机缺少 rs-reborn 时会回退到 `Rscript`。
 
 ### 离线优先说明
 
 - `download -d kegg` 会同时缓存通路文件和 `kegg_<species>_idmap.tsv`（ID 映射）。
 - 之后可通过 `--data-dir` 在离线环境复用缓存，避免运行时依赖网络 ID 转换。
-- 默认发布二进制内置 SQLite 默认库（固定 profile：`species=hsa`，`idmaps_level=basic`），不传 `--db` 会自动使用。
+- 默认发布二进制内置 SQLite 默认库（当前 profile：`embedded-hsa-basic`，覆盖 `kegg/hsa`、`go/hsa/BP` 与基础 `SYMBOL <-> ENTREZID` 映射），不传 `--db` 会自动使用。
+- 默认落盘路径若已有旧 schema 或损坏 runtime DB，会自动重装内置库；schema v1 不再复用。
 - 内置库附带 `assets/default_enrichgo.db.manifest.json`（`sha256` + `contract_profile`），可通过 `enrichgo db audit --db <path> --expect-embedded-manifest` 做一致性校验。
 - 也可用 `--db` 将通路库与 ID 映射打包到单个 SQLite 文件，运行时通过 `--db` 直接读取（更便于分发与复用）。
 - `--idmaps-level extended` 当前离线只回填 `symbol -> entrez`；`UNIPROT`、`REFSEQ`、`ENSEMBL` 仍可检测，但默认不再预填到离线 SQLite。

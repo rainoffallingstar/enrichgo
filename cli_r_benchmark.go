@@ -53,12 +53,12 @@ func resolveRSBinary() (string, error) {
 		}
 		return configured, nil
 	}
-	for _, candidate := range []string{"rvx", "rs-reborn", "rs"} {
+	for _, candidate := range []string{"rvx", "rs-reborn", "rs", "Rscript"} {
 		if path, err := exec.LookPath(candidate); err == nil {
 			return path, nil
 		}
 	}
-	return "", errors.New("rs-reborn CLI not found in PATH (expected `rvx` (preferred), `rs-reborn`, or `rs`); install from https://github.com/rainoffallingstar/rs-reborn")
+	return "", errors.New("R runner not found in PATH (preferred: `rvx` from rs-reborn; fallback: `Rscript`)")
 }
 
 func ensureRReady() error {
@@ -72,7 +72,12 @@ func runRScriptWithRS(scriptPath string, scriptArgs []string, env []string) erro
 		return err
 	}
 	args := make([]string, 0, 2+len(scriptArgs))
-	args = append(args, "run", scriptPath)
+	base := filepath.Base(rsBin)
+	if strings.EqualFold(base, "Rscript") {
+		args = append(args, scriptPath)
+	} else {
+		args = append(args, "run", scriptPath)
+	}
 	args = append(args, scriptArgs...)
 	cmd := exec.Command(rsBin, args...)
 	cmd.Env = env

@@ -55,6 +55,32 @@ echo "[ALIGN] nperm=$ALIGN_NPERM gsea_pvalue_method=$ALIGN_GSEA_PVALUE_METHOD gs
 
 pushd "$ROOT_DIR" >/dev/null
 
+run_r_alignment_baseline() {
+  local script_path="$1"
+  shift
+  local runner="${ENRICHGO_RS_BIN:-}"
+  if [[ -z "$runner" ]]; then
+    if command -v rvx >/dev/null 2>&1; then
+      runner="rvx"
+    elif command -v rs-reborn >/dev/null 2>&1; then
+      runner="rs-reborn"
+    elif command -v rs >/dev/null 2>&1; then
+      runner="rs"
+    elif command -v Rscript >/dev/null 2>&1; then
+      runner="Rscript"
+    else
+      echo "Missing R runner: expected rvx/rs-reborn/rs or Rscript" >&2
+      exit 1
+    fi
+  fi
+
+  if [[ "$(basename "$runner")" == "Rscript" ]]; then
+    "$runner" "$script_path" "$@"
+  else
+    "$runner" run "$script_path" "$@"
+  fi
+}
+
 if [[ "$ALIGN_REBUILD_BIN" == "1" || ! -x "$ROOT_DIR/enrichgo" ]]; then
   echo "Building enrichgo binary..."
   go build -o enrichgo .
@@ -356,7 +382,7 @@ ALIGN_INCLUDE_REACTOME="$ALIGN_INCLUDE_REACTOME" \
 ALIGN_INCLUDE_MSIGDB="$ALIGN_INCLUDE_MSIGDB" \
 ALIGN_R_REACTOME_GMT_FILE="$REACTOME_GMT_FILE" \
 ALIGN_R_MSIGDB_GMT_FILE="$MSIGDB_GMT_FILE" \
-"${ENRICHGO_RS_BIN:-rvx}" run "$ROOT_DIR/scripts/alignment/clusterprofiler_baseline.R" "$INPUT_CSV" "$OUT_DIR"
+run_r_alignment_baseline "$ROOT_DIR/scripts/alignment/clusterprofiler_baseline.R" "$INPUT_CSV" "$OUT_DIR"
 
 # 3) Compare & score
 echo "Comparing Go vs R outputs..."

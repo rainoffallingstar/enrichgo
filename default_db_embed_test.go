@@ -2,12 +2,21 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
+
+	"enrichgo/pkg/store"
+	"enrichgo/pkg/types"
+
+	_ "modernc.org/sqlite"
 )
 
 func TestEmbeddedDefaultSQLiteManifestMatchesEmbeddedDB(t *testing.T) {
@@ -95,7 +104,7 @@ func TestEnsureEmbeddedDefaultSQLiteDBFile_RefreshWhenEmbeddedStateChanges(t *te
 	}
 }
 
-func TestEnsureEmbeddedDefaultSQLiteDBFile_UserManagedNotOverwritten(t *testing.T) {
+func TestEnsureEmbeddedDefaultSQLiteDBFile_UserManagedCurrentSchemaNotOverwritten(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cache", "default_enrichgo.db")
 	t.Setenv(envDefaultSQLitePath, path)
@@ -105,21 +114,152 @@ func TestEnsureEmbeddedDefaultSQLiteDBFile_UserManagedNotOverwritten(t *testing.
 	}
 	markSQLiteDBAsUserManaged(path)
 
-	custom := []byte("custom-user-managed-db")
-	if err := os.WriteFile(path, custom, 0644); err != nil {
-		t.Fatalf("write custom db: %v", err)
+	st, err := store.OpenSQLite(path)
+	if err != nil {
+		t.Fatalf("OpenSQLite user-managed db: %v", err)
+	}
+	writeCtx, writeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer writeCancel()
+	sets := types.GeneSets{
+		&types.GeneSet{ID: "user:set", Name: "User Set", Description: "custom", Genes: map[string]bool{"1": true}},
+	}
+	if err := st.ReplaceGeneSets(writeCtx, store.GeneSetFilter{DB: "reactome", Species: "hsa"}, "SYMBOL", sets, "user-v1"); err != nil {
+		st.Close()
+		t.Fatalf("ReplaceGeneSets: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close user-managed db: %v", err)
 	}
 
 	if _, err := ensureEmbeddedDefaultSQLiteDBFile(); err != nil {
 		t.Fatalf("second ensure error: %v", err)
 	}
+
+	st, err = store.OpenSQLite(path)
+	if err != nil {
+		t.Fatalf("reopen user-managed db: %v", err)
+	}
+	defer st.Close()
+	readCtx, readCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer readCancel()
+	loaded, _, err := st.LoadGeneSets(readCtx, store.GeneSetFilter{DB: "reactome", Species: "hsa"})
+	if err != nil {
+		t.Fatalf("LoadGeneSets: %v", err)
+	}
+	found := false
+	for _, gs := range loaded {
+		if gs != nil && gs.ID == "user:set" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("user-managed current-schema db should not be overwritten")
+	}
+}
+
+func TestEnsureEmbeddedDefaultSQLiteDBFile_UserManagedLegacySchemaReplaced(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cache", "default_enrichgo.db")
+	t.Setenv(envDefaultSQLitePath, path)
+
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	createLegacySchemaDB(t, path)
+	markSQLiteDBAsUserManaged(path)
+
+	if _, err := ensureEmbeddedDefaultSQLiteDBFile(); err != nil {
+		t.Fatalf("ensureEmbeddedDefaultSQLiteDBFile error: %v", err)
+	}
 	got, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read db: %v", err)
+		t.Fatalf("read replaced db: %v", err)
 	}
-	if !bytes.Equal(got, custom) {
-		t.Fatal("user-managed db should not be overwritten")
+	if !bytes.Equal(got, embeddedDefaultSQLiteDB) {
+		t.Fatal("legacy user-managed db should be replaced by embedded bytes")
 	}
+	if state := readEmbeddedSQLiteState(path); state != embeddedDefaultSQLiteSHA256() {
+		t.Fatalf("state=%q, want %q", state, embeddedDefaultSQLiteSHA256())
+	}
+}
+
+func TestEmbeddedDefaultSQLiteDBFile_ContractAndDataAvailable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cache", "default_enrichgo.db")
+	t.Setenv(envDefaultSQLitePath, path)
+
+	installedPath, err := ensureEmbeddedDefaultSQLiteDBFile()
+	if err != nil {
+		t.Fatalf("ensureEmbeddedDefaultSQLiteDBFile: %v", err)
+	}
+	manifest, err := embeddedDefaultSQLiteManifest()
+	if err != nil {
+		t.Fatalf("embeddedDefaultSQLiteManifest: %v", err)
+	}
+	st, err := store.OpenSQLite(installedPath)
+	if err != nil {
+		t.Fatalf("OpenSQLite: %v", err)
+	}
+	defer st.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	report, err := st.AuditWithContract(ctx, manifest.ContractProfile)
+	if err != nil {
+		t.Fatalf("AuditWithContract: %v", err)
+	}
+	if !report.ContractValid {
+		t.Fatalf("embedded DB contract invalid: %v", report.ContractViolations)
+	}
+	keggSets, _, err := st.LoadGeneSets(ctx, store.GeneSetFilter{DB: "kegg", Species: "hsa"})
+	if err != nil {
+		t.Fatalf("LoadGeneSets kegg: %v", err)
+	}
+	if len(keggSets) == 0 {
+		t.Fatal("embedded DB should provide at least one KEGG gene set")
+	}
+}
+
+func TestEmbeddedDefaultSQLiteCLI_ORASmoke(t *testing.T) {
+	outPath := filepath.Join(t.TempDir(), "ora.tsv")
+	runCLIWithEmbeddedDefault(t,
+		"analyze", "ora",
+		"-i", "test-data/DE_results.csv",
+		"-d", "kegg",
+		"-s", "hsa",
+		"--split-by-direction=false",
+		"--auto-update-db=false",
+		"-o", outPath,
+	)
+	assertNonEmptyOutputFile(t, outPath)
+}
+
+func TestEmbeddedDefaultSQLiteCLI_GSEASmoke(t *testing.T) {
+	outPath := filepath.Join(t.TempDir(), "gsea.tsv")
+	runCLIWithEmbeddedDefault(t,
+		"analyze", "gsea",
+		"-i", "test-data/DE_results.csv",
+		"-d", "go",
+		"-s", "hsa",
+		"--auto-update-db=false",
+		"-nPerm", "20",
+		"-o", outPath,
+	)
+	assertNonEmptyOutputFile(t, outPath)
+}
+
+func TestCLIHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
+	for i, arg := range os.Args {
+		if arg == "--" {
+			os.Args = append([]string{"enrichgo"}, os.Args[i+1:]...)
+			main()
+			os.Exit(0)
+		}
+	}
+	os.Exit(2)
 }
 
 func TestFileSHA256(t *testing.T) {
@@ -190,5 +330,50 @@ func TestBuildDownloadUpdateArgs(t *testing.T) {
 				t.Fatalf("args mismatch\n got=%v\nwant=%v", got, tc.want)
 			}
 		})
+	}
+}
+
+func createLegacySchemaDB(t *testing.T, path string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close()
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS meta (key TEXT NOT NULL PRIMARY KEY, value TEXT NOT NULL);`,
+		`DELETE FROM meta WHERE key='schema_version';`,
+		`INSERT INTO meta(key, value) VALUES('schema_version', '1');`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("exec %q: %v", stmt, err)
+		}
+	}
+}
+
+func runCLIWithEmbeddedDefault(t *testing.T, args ...string) {
+	t.Helper()
+	runtimeDBPath := filepath.Join(t.TempDir(), "runtime-default.db")
+	cmdArgs := append([]string{"-test.run=TestCLIHelperProcess", "--"}, args...)
+	cmd := exec.Command(os.Args[0], cmdArgs...)
+	cmd.Env = append(os.Environ(),
+		"GO_WANT_HELPER_PROCESS=1",
+		"ENRICHGO_DEFAULT_DB_PATH="+runtimeDBPath,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("CLI failed: %v\n%s", err, string(output))
+	}
+}
+
+func assertNonEmptyOutputFile(t *testing.T, path string) {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read output file: %v", err)
+	}
+	if len(bytes.TrimSpace(content)) == 0 {
+		t.Fatalf("output file is empty: %s", path)
 	}
 }

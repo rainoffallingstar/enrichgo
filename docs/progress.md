@@ -25,7 +25,11 @@
 - [x] `enrich` - ORA 富集分析
 - [x] `gsea` - GSEA 富集分析
 - [x] `download` - 数据库下载
+- [x] `db audit` - SQLite 资产审计
 - [x] `--data-dir` 统一数据库目录
+- [x] `--use-embedded-db` / `--auto-update-db` 默认 SQLite 运行链路
+- [x] `--update-db` 分析前更新 SQLite 数据
+- [x] `--use-r` / `--benchmark` Go vs R 双实现模式
 - [x] `--allow-id-fallback` 显式回退策略（默认转换失败即退出）
 
 ### 单元测试
@@ -44,8 +48,9 @@
 
 - `test-data/DE_results.csv` 可直接作为 `enrich`/`gsea` 输入。
 - ORA/GSEA 结果可输出 `tsv/csv/json`。
+- 默认发布二进制内置 `embedded-hsa-basic` SQLite，可直接支撑 `kegg/hsa` ORA 与 `go/hsa/BP` GSEA。
+- 默认落盘路径若已有旧 schema runtime DB，会自动重装内置库；schema v1 不再复用。
 - 默认 MSigDB 范围为 `c1-c8`，可用 `-c c2` 或 `-c c1,c2` 覆盖。
-- ID 转换在网络不可用时会默认报错退出，避免“静默0结果”。
 - `download -d kegg` 会额外缓存 `kegg_<species>_idmap.tsv`，供离线 ID 转换复用。
 - `extended` 离线 SQLite 当前只额外覆盖 `symbol -> entrez`，不再默认预填 `UNIPROT`、`REFSEQ`、`ENSEMBL`。
 
@@ -86,8 +91,10 @@ go test ./...
 
 ### 测试覆盖
 ```
-pkg/analysis:    ORA, FDR 算法测试
+pkg/analysis:    ORA, FDR, GSEA 算法测试
 pkg/annotation:  ID 检测, ID 转换测试
+pkg/io:          表格输入与 ranked 输入解析测试
+main/default DB: 嵌入 SQLite 安装、旧 schema 替换、默认 CLI smoke
 ```
 
 ---

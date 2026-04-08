@@ -2,6 +2,26 @@
 
 ## 待解决问题
 
+### 默认发布链路与门禁
+**现状（已缓解）**:
+- 默认内嵌 SQLite 已切回 `embedded-hsa-basic`，并补上 `no --db` 的 ORA/GSEA smoke 测试与 release precheck 覆盖。
+- 默认落盘路径遇到旧 schema runtime DB 时会自动重装内嵌库，不再复用 schema v1。
+
+**仍待解决**:
+- 若要扩大默认内嵌库覆盖（Reactome / MSigDB / 更多 GO ontology），需要单独评估资产体积与构建时间。
+- 保持本地 `tools/build_embedded_db` 与发布流程中的嵌入资产生成步骤一致。
+
+---
+
+### GSEA/GO 对齐收敛
+**现状**:
+- 当前基线仍有 `gsea/go nes_abs_err_median=0.022662 > 0.020000`，本次发布收口未将其作为阻塞项。
+
+**仍待解决**:
+- 继续收敛 GSEA/GO 的排序、归一化与 p 值估计差异，恢复 formal 门禁通过。
+
+---
+
 ### 1. ID 转换缓存：持久化/可配置化 (优先级: 中)
 **现状（已缓解）**:
 - `KEGGIDConverter` 已使用按 `species:fromType:toType` 分桶的 LRU 缓存，并支持“部分命中 + 仅补齐缺失项”，避免重复请求/重复计算。

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"database/sql"
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
@@ -12,8 +13,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+
+	"enrichgo/pkg/store"
+
+	_ "modernc.org/sqlite"
 )
 
 const (
@@ -151,6 +157,25 @@ func markSQLiteDBAsUserManaged(dbPath string) {
 	_ = os.Remove(embeddedSQLiteStatePath(dbPath))
 }
 
+func currentSchemaSQLiteFile(path string) (bool, error) {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return false, fmt.Errorf("open sqlite file: %w", err)
+	}
+	defer db.Close()
+
+	var versionText string
+	if err := db.QueryRow(`SELECT value FROM meta WHERE key=?`, "schema_version").Scan(&versionText); err != nil {
+		return false, fmt.Errorf("read schema version: %w", err)
+	}
+
+	version, err := strconv.Atoi(strings.TrimSpace(versionText))
+	if err != nil {
+		return false, fmt.Errorf("parse schema version %q: %w", versionText, err)
+	}
+	return version == store.CurrentSchemaVersion, nil
+}
+
 func ensureEmbeddedDefaultSQLiteDBFile() (string, error) {
 	if len(embeddedDefaultSQLiteDB) == 0 {
 		return "", fmt.Errorf("embedded default sqlite db is empty")
@@ -172,13 +197,16 @@ func ensureEmbeddedDefaultSQLiteDBFile() (string, error) {
 	if fi, err := os.Stat(path); err == nil {
 		if fi.Size() > 0 {
 			existingState := readEmbeddedSQLiteState(path)
-			if existingState == "" {
-				// No embed marker means this DB is managed by user/update flow; keep it.
-				return path, nil
-			}
 			if existingState == embeddedSHA {
 				fileSHA, shaErr := fileSHA256(path)
 				if shaErr == nil && fileSHA == embeddedSHA {
+					return path, nil
+				}
+			}
+			if existingState == "" {
+				reusable, reuseErr := currentSchemaSQLiteFile(path)
+				if reuseErr == nil && reusable {
+					// No embed marker with current supported schema means this DB is user-managed.
 					return path, nil
 				}
 			}

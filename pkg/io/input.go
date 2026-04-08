@@ -308,17 +308,17 @@ func ParseRankedGeneFile(filePath string) (*GeneInput, error) {
 			gene = strings.TrimSpace(record[0])
 			value = 1.0
 		} else if len(record) >= 2 {
-			// 尝试解析为 rank 或 value
-			gene = strings.TrimSpace(record[0])
-
-			// 尝试第二列为数值
-			if v, err := strconv.ParseFloat(strings.TrimSpace(record[1]), 64); err == nil {
+			first := strings.TrimSpace(record[0])
+			second := strings.TrimSpace(record[1])
+			if v, err := strconv.ParseFloat(second, 64); err == nil {
+				gene = first
+				value = v
+			} else if v, err := strconv.ParseFloat(first, 64); err == nil {
+				gene = second
 				value = v
 			} else {
-				// 可能是 rank 值
-				if v, err := strconv.ParseFloat(strings.TrimSpace(record[1]), 64); err == nil {
-					value = v
-				}
+				gene = first
+				value = 1.0
 			}
 		}
 

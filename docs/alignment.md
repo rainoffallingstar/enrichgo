@@ -153,6 +153,7 @@ python3 scripts/alignment/check_alignment_thresholds.py \
 当前门禁状态（`scripts/alignment/check_alignment_thresholds.py` 默认阈值）：
 
 - 未通过：`gsea/go nes_abs_err_median=0.022662 > 0.020000`
+- 当前发布收口不以此项为阻塞；优先保证默认 SQLite / CLI 交付链路稳定，后续继续收敛算法对齐。
 
 ## 依赖
 

@@ -1,6 +1,8 @@
 package io
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -55,4 +57,61 @@ func TestParseDiffGeneTableGeneCount(t *testing.T) {
 	if len(input.Genes) != len(input.GeneValues) {
 		t.Errorf("len(Genes)=%d != len(GeneValues)=%d", len(input.Genes), len(input.GeneValues))
 	}
+}
+
+func TestParseRankedGeneFileGeneThenRank(t *testing.T) {
+	path := writeTempRankedFile(t, "GENE1\t2.5\nGENE2\t1.5\n")
+	input, err := ParseRankedGeneFile(path)
+	if err != nil {
+		t.Fatalf("ParseRankedGeneFile failed: %v", err)
+	}
+	if len(input.Genes) != 2 {
+		t.Fatalf("len(Genes)=%d, want 2", len(input.Genes))
+	}
+	if input.Genes[0] != "GENE1" || input.Genes[1] != "GENE2" {
+		t.Fatalf("Genes=%v, want [GENE1 GENE2]", input.Genes)
+	}
+	if input.GeneValues["GENE1"] != 2.5 || input.GeneValues["GENE2"] != 1.5 {
+		t.Fatalf("GeneValues=%v", input.GeneValues)
+	}
+}
+
+func TestParseRankedGeneFileRankThenGene(t *testing.T) {
+	path := writeTempRankedFile(t, "2.5\tGENE1\n1.5\tGENE2\n")
+	input, err := ParseRankedGeneFile(path)
+	if err != nil {
+		t.Fatalf("ParseRankedGeneFile failed: %v", err)
+	}
+	if len(input.Genes) != 2 {
+		t.Fatalf("len(Genes)=%d, want 2", len(input.Genes))
+	}
+	if input.Genes[0] != "GENE1" || input.Genes[1] != "GENE2" {
+		t.Fatalf("Genes=%v, want [GENE1 GENE2]", input.Genes)
+	}
+	if input.GeneValues["GENE1"] != 2.5 || input.GeneValues["GENE2"] != 1.5 {
+		t.Fatalf("GeneValues=%v", input.GeneValues)
+	}
+}
+
+func TestParseRankedGeneFileSingleColumnAndComments(t *testing.T) {
+	path := writeTempRankedFile(t, "# comment\nGENE1\n\nGENE2\n")
+	input, err := ParseRankedGeneFile(path)
+	if err != nil {
+		t.Fatalf("ParseRankedGeneFile failed: %v", err)
+	}
+	if len(input.Genes) != 2 {
+		t.Fatalf("len(Genes)=%d, want 2", len(input.Genes))
+	}
+	if input.GeneValues["GENE1"] != 1.0 || input.GeneValues["GENE2"] != 1.0 {
+		t.Fatalf("GeneValues=%v", input.GeneValues)
+	}
+}
+
+func writeTempRankedFile(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "ranked.tsv")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("os.WriteFile: %v", err)
+	}
+	return path
 }

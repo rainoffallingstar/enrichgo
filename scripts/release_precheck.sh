@@ -12,6 +12,10 @@ SKIP_SYNC="${RELEASE_PRECHECK_SKIP_SYNC:-0}"
 IDMAPS_LEVEL="${RELEASE_PRECHECK_IDMAPS_LEVEL:-basic}"
 IDMAPS_RESUME="${RELEASE_PRECHECK_IDMAPS_RESUME:-1}"
 IDMAPS_FORCE_REFRESH="${RELEASE_PRECHECK_IDMAPS_FORCE_REFRESH:-0}"
+EMBED_SPECIES="${RELEASE_PRECHECK_EMBED_SPECIES:-hsa}"
+EMBED_IDMAPS_LEVEL="${RELEASE_PRECHECK_EMBED_IDMAPS_LEVEL:-basic}"
+EMBED_GO_ONTOLOGY="${RELEASE_PRECHECK_EMBED_GO_ONTOLOGY:-BP}"
+EMBED_CONTRACT_PROFILE="${RELEASE_PRECHECK_EMBED_CONTRACT_PROFILE:-embedded-${EMBED_SPECIES}-${EMBED_IDMAPS_LEVEL}}"
 
 if [[ "$IDMAPS_LEVEL" != "basic" && "$IDMAPS_LEVEL" != "extended" ]]; then
   echo "[ERROR] RELEASE_PRECHECK_IDMAPS_LEVEL must be basic or extended (got: $IDMAPS_LEVEL)" >&2
@@ -39,9 +43,21 @@ echo "[PRECHECK] db=$DB_PATH"
 echo "[PRECHECK] out=$OUT_DIR"
 echo "[PRECHECK] nperm=$NPERM skip_sync=$SKIP_SYNC"
 echo "[PRECHECK] idmaps_level=$IDMAPS_LEVEL resume=$IDMAPS_RESUME force_refresh=$IDMAPS_FORCE_REFRESH"
+echo "[PRECHECK] embedded_species=$EMBED_SPECIES embedded_idmaps_level=$EMBED_IDMAPS_LEVEL embedded_go_ontology=$EMBED_GO_ONTOLOGY"
 
 echo "[STEP] go test ./..."
 go test ./...
+
+echo "[STEP] rebuild embedded DB asset from local data"
+go run ./tools/build_embedded_db \
+  --db assets/default_enrichgo.db \
+  --manifest assets/default_enrichgo.db.manifest.json \
+  --artifact assets/default_enrichgo.db \
+  --data-dir data \
+  --species "$EMBED_SPECIES" \
+  --contract-profile "$EMBED_CONTRACT_PROFILE" \
+  --idmaps-level "$EMBED_IDMAPS_LEVEL" \
+  --go-ontology "$EMBED_GO_ONTOLOGY"
 
 echo "[STEP] build enrichgo binary"
 go build -o ./enrichgo .
@@ -57,6 +73,12 @@ done
 
 echo "[STEP] embedded manifest audit"
 ./enrichgo db audit --db assets/default_enrichgo.db --expect-embedded-manifest --strict-contract=true
+
+echo "[STEP] embedded default-path smoke"
+EMBEDDED_RUNTIME_DB="$OUT_DIR/embedded_runtime.db"
+rm -f "$EMBEDDED_RUNTIME_DB" "$EMBEDDED_RUNTIME_DB.embed.sha256"
+env ENRICHGO_DEFAULT_DB_PATH="$EMBEDDED_RUNTIME_DB" ./enrichgo analyze ora  -i "$INPUT_CSV" -d kegg -s hsa --split-by-direction=false --auto-update-db=false -o "$OUT_DIR/embedded_ora_kegg.tsv"
+env ENRICHGO_DEFAULT_DB_PATH="$EMBEDDED_RUNTIME_DB" ./enrichgo analyze gsea -i "$INPUT_CSV" -d go   -s hsa --auto-update-db=false -nPerm "$NPERM" -o "$OUT_DIR/embedded_gsea_go.tsv"
 
 if [[ "$SKIP_SYNC" != "1" ]]; then
   echo "[STEP] sync full release DB (all/hsa, idmaps=$IDMAPS_LEVEL)"
@@ -96,6 +118,8 @@ echo "[STEP] run strict-mode matrix"
 
 echo "[STEP] validate output files"
 for f in \
+  "$OUT_DIR/embedded_ora_kegg.tsv" \
+  "$OUT_DIR/embedded_gsea_go.tsv" \
   "$OUT_DIR/ora_kegg.tsv" \
   "$OUT_DIR/gsea_go.tsv" \
   "$OUT_DIR/ora_reactome.tsv" \
