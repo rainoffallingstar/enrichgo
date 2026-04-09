@@ -27,6 +27,15 @@ type Pathway struct {
 	Description string
 }
 
+// NormalizeKEGGPathwayID normalizes pathway identifiers returned from different KEGG endpoints.
+// Common variants include "hsa00010", "path:hsa00010", and "pathway:hsa00010".
+func NormalizeKEGGPathwayID(id string) string {
+	id = strings.TrimSpace(id)
+	id = strings.TrimPrefix(id, "pathway:")
+	id = strings.TrimPrefix(id, "path:")
+	return strings.TrimSpace(id)
+}
+
 // DownloadKEGG 下载 KEGG 通路数据
 func DownloadKEGG(species, outputDir string) (*KEGGData, error) {
 	// KEGG REST API
@@ -64,7 +73,7 @@ func DownloadKEGG(species, outputDir string) (*KEGGData, error) {
 			continue
 		}
 
-		pathwayID := strings.TrimPrefix(parts[0], "pathway:")
+		pathwayID := NormalizeKEGGPathwayID(parts[0])
 		geneID := parts[1]
 
 		// 提取物种前缀后的基因 ID
@@ -121,23 +130,78 @@ func fetchKEGGPathwayInfo(data *KEGGData) error {
 		return fmt.Errorf("KEGG API error: %s", resp.Status)
 	}
 
+	pathwaysByNormalizedID := make(map[string]*Pathway, len(data.Pathways))
+	for _, pw := range data.Pathways {
+		if pw == nil {
+			continue
+		}
+		key := NormalizeKEGGPathwayID(pw.ID)
+		if key == "" {
+			continue
+		}
+		pathwaysByNormalizedID[key] = pw
+	}
+
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
 		line := scanner.Text()
-		parts := strings.SplitN(line, "\t", 2)
+		parts := strings.SplitN(line, "	", 2)
 		if len(parts) < 2 {
 			continue
 		}
 
-		pathwayID := strings.TrimPrefix(parts[0], "pathway:")
-		name := parts[1]
+		pathwayID := NormalizeKEGGPathwayID(parts[0])
+		name := strings.TrimSpace(parts[1])
 
-		if pw, ok := data.Pathways[pathwayID]; ok {
+		if pw, ok := pathwaysByNormalizedID[pathwayID]; ok {
 			pw.Name = name
+			if strings.TrimSpace(pw.Description) == "" || strings.TrimSpace(pw.Description) == "-" {
+				pw.Description = name
+			}
 		}
 	}
 
 	return nil
+}
+
+// FetchKEGGPathwayNames fetches the KEGG pathway name table for a species.
+// Returned keys are normalized pathway IDs without the "path:" prefix.
+func FetchKEGGPathwayNames(species string) (map[string]string, error) {
+	url := fmt.Sprintf("https://rest.kegg.jp/list/pathway/%s", species)
+
+	client := netutil.DefaultClient()
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("KEGG API error: %s", resp.Status)
+	}
+
+	names := make(map[string]string)
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		parts := strings.SplitN(line, "	", 2)
+		if len(parts) < 2 {
+			continue
+		}
+		pathwayID := NormalizeKEGGPathwayID(parts[0])
+		name := strings.TrimSpace(parts[1])
+		if pathwayID == "" || name == "" {
+			continue
+		}
+		if _, exists := names[pathwayID]; !exists {
+			names[pathwayID] = name
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return names, nil
 }
 
 // LoadKEGG 加载本地 KEGG 数据

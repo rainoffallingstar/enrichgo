@@ -340,25 +340,128 @@ func uniqueStringsPreserveOrder(ids []string) []string {
 }
 
 func hydrateDisplayMapForKEGG(display map[string]string, database, species, dataDir string, st *store.SQLiteStore) {
-	if len(display) > 0 || !strings.EqualFold(database, "kegg") {
+	if !strings.EqualFold(database, "kegg") {
 		return
 	}
 	if st != nil {
 		if m, err := loadEntrezSymbolMapFromSQLite(st, species); err == nil {
-			for k, v := range m {
-				display[k] = v
-			}
+			mergeDisplayMapMissing(display, m)
 		}
-	}
-	if len(display) > 0 {
-		return
 	}
 	idmapPath := filepath.Join(dataDir, fmt.Sprintf("kegg_%s_idmap.tsv", species))
 	if m, err := loadEntrezSymbolMapFromIDMap(idmapPath); err == nil {
-		for k, v := range m {
+		mergeDisplayMapMissing(display, m)
+	}
+}
+
+func mergeDisplayMapMissing(display, extra map[string]string) {
+	if len(extra) == 0 {
+		return
+	}
+	for k, v := range extra {
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		if k == "" || v == "" {
+			continue
+		}
+		if _, exists := display[k]; !exists {
 			display[k] = v
 		}
 	}
+}
+
+func hydrateKEGGGeneSetMetadata(geneSets analysis.GeneSets, species, dataDir string) {
+	if !keggGeneSetsNeedMetadataHydration(geneSets) {
+		return
+	}
+	mergeKEGGGeneSetMetadata(geneSets, loadKEGGPathwayNamesFromLocal(species, dataDir))
+	if !keggGeneSetsNeedMetadataHydration(geneSets) {
+		return
+	}
+	names, err := database.FetchKEGGPathwayNames(species)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to hydrate KEGG pathway metadata: %v\n", err)
+		return
+	}
+	mergeKEGGGeneSetMetadata(geneSets, names)
+}
+
+func loadKEGGPathwayNamesFromLocal(species, dataDir string) map[string]string {
+	if strings.TrimSpace(dataDir) == "" {
+		return nil
+	}
+	data, err := database.LoadKEGG(species, dataDir)
+	if err != nil || data == nil {
+		return nil
+	}
+	names := make(map[string]string, len(data.Pathways))
+	for _, pw := range data.Pathways {
+		if pw == nil {
+			continue
+		}
+		key := database.NormalizeKEGGPathwayID(pw.ID)
+		name := strings.TrimSpace(pw.Name)
+		if key == "" || keggPathwayNamePlaceholder(pw.ID, name) {
+			continue
+		}
+		if _, exists := names[key]; !exists {
+			names[key] = name
+		}
+	}
+	return names
+}
+
+func mergeKEGGGeneSetMetadata(geneSets analysis.GeneSets, names map[string]string) {
+	if len(names) == 0 {
+		return
+	}
+	for _, gs := range geneSets {
+		if gs == nil {
+			continue
+		}
+		name := strings.TrimSpace(names[database.NormalizeKEGGPathwayID(gs.ID)])
+		if name == "" {
+			continue
+		}
+		if keggPathwayNamePlaceholder(gs.ID, gs.Name) {
+			gs.Name = name
+		}
+		if keggPathwayDescriptionPlaceholder(gs.Description) {
+			gs.Description = name
+		}
+	}
+}
+
+func keggGeneSetsNeedMetadataHydration(geneSets analysis.GeneSets) bool {
+	for _, gs := range geneSets {
+		if gs == nil {
+			continue
+		}
+		if keggPathwayNamePlaceholder(gs.ID, gs.Name) || keggPathwayDescriptionPlaceholder(gs.Description) {
+			return true
+		}
+	}
+	return false
+}
+
+func keggPathwayNamePlaceholder(id, name string) bool {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" || trimmed == "-" {
+		return true
+	}
+	if strings.EqualFold(trimmed, strings.TrimSpace(id)) {
+		return true
+	}
+	normalizedID := database.NormalizeKEGGPathwayID(id)
+	if normalizedID == "" {
+		return false
+	}
+	return strings.EqualFold(database.NormalizeKEGGPathwayID(trimmed), normalizedID)
+}
+
+func keggPathwayDescriptionPlaceholder(desc string) bool {
+	trimmed := strings.TrimSpace(desc)
+	return trimmed == "" || trimmed == "-"
 }
 
 type geneSetLoadOptions struct {
@@ -387,6 +490,7 @@ func loadGeneSetsWithAnnotations(opts geneSetLoadOptions) (*geneSetLoadResult, e
 				return nil, err
 			}
 			result.GeneSets = sets
+			hydrateKEGGGeneSetMetadata(result.GeneSets, opts.Species, opts.DataDir)
 			return result, nil
 		}
 		data, err := database.LoadOrDownloadKEGG(opts.Species, opts.DataDir)
@@ -404,6 +508,7 @@ func loadGeneSetsWithAnnotations(opts geneSetLoadOptions) (*geneSetLoadResult, e
 				Description: pw.Description,
 			})
 		}
+		hydrateKEGGGeneSetMetadata(result.GeneSets, opts.Species, opts.DataDir)
 		return result, nil
 
 	case "go":
