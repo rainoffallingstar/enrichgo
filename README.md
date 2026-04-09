@@ -93,6 +93,25 @@ go build -o enrichgo .
 - `--update-db` 不支持 `-d custom`
 - `--update-db` 成功后，该 DB 会标记为用户管理，后续不会被内置默认库自动覆盖
 
+## Codex Skill 安装
+
+仓库内已附带可安装的 Codex skill：`skills/enrichgo-cli/`。
+
+安装到当前用户的 Codex 技能目录：
+
+```bash
+cp -a skills/enrichgo-cli ~/.codex/skills/
+```
+
+如果目标目录还不存在，可先创建：
+
+```bash
+mkdir -p ~/.codex/skills
+cp -a skills/enrichgo-cli ~/.codex/skills/
+```
+
+安装后重启 Codex。触发时可直接显式提到 `$enrichgo-cli`，也可以在 enrichgo 仓库内处理 ORA / GSEA、数据库同步、SQLite 审计、Go vs R 对齐与 benchmark 任务时让 Codex 自动命中该 skill。
+
 ## Go / R 运行模式
 
 ### 默认 Go 实现

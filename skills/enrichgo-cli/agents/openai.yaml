@@ -1,0 +1,7 @@
+interface:
+  display_name: "Enrichgo CLI"
+  short_description: "Work on the enrichgo ORA, GSEA, DB, and parity workflows"
+  default_prompt: "Use $enrichgo-cli to inspect this enrichgo workspace, choose the correct subcommand or code path, and complete the task with repo-specific commands or edits."
+
+policy:
+  allow_implicit_invocation: true
