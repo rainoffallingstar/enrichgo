@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -95,6 +96,7 @@ var reactomeSpeciesPrefixMap = map[string]string{
 
 var reactomeHTTPClient HTTPClient = netutil.NewClient(netutil.Options{Timeout: 5 * time.Minute})
 var reactomeDownloadURL = "https://reactome.org/download/current/ReactomePathways.gmt.zip"
+var reactomeNCBI2PathwayURL = "https://reactome.org/download/current/NCBI2Reactome_PE_Pathway.txt"
 
 // DownloadReactome 下载 Reactome 通路数据。
 // 默认启用自动重试（可通过 DownloadReactomeWithOptions 覆盖）。
@@ -182,6 +184,7 @@ func downloadReactomeOnce(species, outputDir string) (*ReactomeData, error) {
 
 	// 解析 GMT 文件，只保留指定物种
 	scanner := bufio.NewScanner(gmtReader)
+	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
 		fields := strings.Split(line, "\t")
@@ -215,6 +218,16 @@ func downloadReactomeOnce(species, outputDir string) (*ReactomeData, error) {
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("failed to parse GMT: %w", err)
+	}
+
+	// Reactome current GMT may contain human pathways only.
+	// Fall back to species-specific NCBI mapping when target species is empty.
+	if len(data.Pathways) == 0 {
+		fallbackData, err := downloadReactomeFromNCBIPathwayMap(species)
+		if err != nil {
+			return nil, err
+		}
+		data = fallbackData
 	}
 
 	// 保存到文件
@@ -263,6 +276,99 @@ func isRetryableReactomeError(err error) bool {
 		}
 	}
 	return false
+}
+
+func downloadReactomeFromNCBIPathwayMap(species string) (*ReactomeData, error) {
+	speciesKey := strings.ToLower(strings.TrimSpace(species))
+	speciesName, ok := ReactomeSpeciesMap[speciesKey]
+	if !ok || speciesName == "" {
+		return nil, fmt.Errorf("reactome species unsupported or unknown: %s", species)
+	}
+
+	taxID, err := TaxIDForSpecies(speciesKey)
+	if err != nil {
+		return nil, fmt.Errorf("resolve taxid for reactome %s: %w", species, err)
+	}
+
+	entrez2symbol := make(map[string]string)
+	if err := StreamNCBIGeneInfoForSpecies(speciesKey, taxID, reactomeHTTPClient,
+		func(entrez, symbol string) error {
+			entrez = strings.TrimSpace(entrez)
+			symbol = strings.TrimSpace(symbol)
+			if entrez == "" || symbol == "" || symbol == "-" {
+				return nil
+			}
+			if _, exists := entrez2symbol[entrez]; !exists {
+				entrez2symbol[entrez] = symbol
+			}
+			return nil
+		},
+		func(_, _ string) error { return nil },
+	); err != nil {
+		return nil, fmt.Errorf("fetch ncbi gene_info for reactome %s: %w", species, err)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, reactomeNCBI2PathwayURL, nil)
+	resp, err := reactomeHTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download Reactome NCBI mapping: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to download Reactome NCBI mapping: HTTP %d", resp.StatusCode)
+	}
+
+	data := emptyReactomeData(species)
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		// NCBI2Reactome_PE_Pathway columns:
+		// 0: NCBI Gene ID, 3: pathway stable ID, 5: pathway name, 7: species name
+		if len(fields) < 8 {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(fields[7]), speciesName) {
+			continue
+		}
+
+		pathwayID := strings.TrimSpace(fields[3])
+		pathwayName := strings.TrimSpace(fields[5])
+		entrezID := strings.TrimSpace(fields[0])
+		if pathwayID == "" || pathwayName == "" || entrezID == "" {
+			continue
+		}
+		if _, err := strconv.Atoi(entrezID); err != nil {
+			continue
+		}
+		symbol := strings.TrimSpace(entrez2symbol[entrezID])
+		if symbol == "" {
+			continue
+		}
+
+		pw := data.Pathways[pathwayID]
+		if pw == nil {
+			pw = &Pathway{
+				ID:          pathwayID,
+				Name:        pathwayName,
+				Genes:       make(map[string]bool),
+				Description: pathwayName,
+			}
+			data.Pathways[pathwayID] = pw
+		}
+		pw.Genes[symbol] = true
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("failed to parse Reactome NCBI mapping: %w", err)
+	}
+	if len(data.Pathways) == 0 {
+		return nil, fmt.Errorf("no Reactome pathways found for species %s from NCBI mapping", species)
+	}
+	return data, nil
 }
 
 // SaveGMTFileFromPathways 保存为 GMT 文件

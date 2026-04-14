@@ -3,6 +3,7 @@ package database
 import (
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -117,6 +118,77 @@ func TestDownloadReactomeWithOptionsRetryDisabled(t *testing.T) {
 	if atomic.LoadInt32(&hits) != 1 {
 		t.Fatalf("expected 1 attempt when retry disabled, got %d", atomic.LoadInt32(&hits))
 	}
+}
+
+func TestDownloadReactomeFallbackToNCBIPathwayMapForMMU(t *testing.T) {
+	zipPayload := buildReactomeGMTZip(t, "Apoptosis\tR-HSA-12345\tTP53\tCASP3\n")
+	ncbi2Pathway := "100009614\tR-MMU-6810244\tKrtap12-22 [cytosol]\tR-MMU-6805567\thttps://reactome.org/PathwayBrowser/#/R-MMU-6805567\tKeratinization\tIEA\tMus musculus\n"
+	geneInfoGZ := buildGzipPayload(t, "#header\n10090\t100009614\tKrtap12-22\t-\t-\t-\t-\t-\t-\t-\t-\t-\n")
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/reactome.zip":
+			w.Header().Set("Content-Type", "application/zip")
+			_, _ = w.Write(zipPayload)
+		case "/ncbi2.txt":
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte(ncbi2Pathway))
+		case "/gene_info.gz":
+			w.Header().Set("Content-Type", "application/gzip")
+			_, _ = w.Write(geneInfoGZ)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	oldURL := reactomeDownloadURL
+	oldMapURL := reactomeNCBI2PathwayURL
+	oldClient := reactomeHTTPClient
+	oldGeneInfo := ncbiGeneInfoURLBySpecies["mmu"]
+	defer func() {
+		reactomeDownloadURL = oldURL
+		reactomeNCBI2PathwayURL = oldMapURL
+		reactomeHTTPClient = oldClient
+		ncbiGeneInfoURLBySpecies["mmu"] = oldGeneInfo
+	}()
+
+	reactomeDownloadURL = ts.URL + "/reactome.zip"
+	reactomeNCBI2PathwayURL = ts.URL + "/ncbi2.txt"
+	reactomeHTTPClient = ts.Client()
+	ncbiGeneInfoURLBySpecies["mmu"] = ts.URL + "/gene_info.gz"
+
+	data, err := DownloadReactomeWithOptions("mmu", "", &ReactomeDownloadOptions{
+		AutoRetry:    false,
+		MaxRetries:   0,
+		RetryBackoff: 0,
+	})
+	if err != nil {
+		t.Fatalf("DownloadReactomeWithOptions fallback failed: %v", err)
+	}
+	if data == nil || len(data.Pathways) == 0 {
+		t.Fatalf("expected non-empty pathways from fallback mapping")
+	}
+	pw := data.Pathways["R-MMU-6805567"]
+	if pw == nil {
+		t.Fatalf("expected R-MMU-6805567 in fallback pathways")
+	}
+	if !pw.Genes["Krtap12-22"] {
+		t.Fatalf("expected Krtap12-22 in fallback pathway genes")
+	}
+}
+
+func buildGzipPayload(t *testing.T, content string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write([]byte(content)); err != nil {
+		t.Fatalf("write gzip payload: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("close gzip writer: %v", err)
+	}
+	return buf.Bytes()
 }
 
 func buildReactomeGMTZip(t *testing.T, gmtContent string) []byte {

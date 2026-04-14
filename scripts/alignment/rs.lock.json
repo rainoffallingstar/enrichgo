@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "generated_at": "2026-04-10T01:56:38.012939406Z",
+  "script": "/home/fallingstar10/clusterProfiler/enrichgo/scripts/alignment/clusterprofiler_baseline.R",
+  "repo": "https://cloud.r-project.org",
+  "library": "/home/fallingstar10/.cache/rs/lib/c7ae07d81d43f92c",
+  "metadata": {
+    "interpreter": "/home/fallingstar10/.local/share/rs/r/versions/4.5.2-linux-amd64/bin/Rscript",
+    "r_version": "4.5.2",
+    "platform": "x86_64-pc-linux-gnu",
+    "arch": "x86_64",
+    "os": "linux-gnu",
+    "package_type": "source"
+  },
+  "packages": [
+    {
+      "name": "BiocParallel",
+      "version": "1.42.2",
+      "source": "bioconductor"
+    },
+    {
+      "name": "clusterProfiler",
+      "version": "4.16.0",
+      "source": "cran"
+    },
+    {
+      "name": "jsonlite",
+      "version": "2.0.0",
+      "source": "cran"
+    },
+    {
+      "name": "org.Hs.eg.db",
+      "version": "3.21.0",
+      "source": "bioconductor"
+    }
+  ]
+}
